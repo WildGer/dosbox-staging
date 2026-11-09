@@ -107,12 +107,15 @@ game wrote to VRAM.
 For each scanout, the probe computes:
 
 - An FNV-1a fingerprint of the source pixel data.
-- For indexed 8-bit frames, a separate fingerprint of the RGB values of **only
-  the palette entries used by the current source pixels**. A changed but
-  unused palette entry does not count as a new visible image.
+- For indexed 8-bit frames, a fingerprint of each pixel's **mapped RGB
+  colour**, plus a separate diagnostic fingerprint of only the palette
+  entries actually used. Changed raw palette indices that result in exactly
+  the same displayed colours do **not** count as a new visible image; a changed
+  unused palette entry does not count either.
 - Changes to frame geometry (width/height/pitch/pixel format).
 
-Changes are determined by comparing the new scanout with the previous one.
+Visible-image changes are determined by comparing the RGB-equivalent
+fingerprint and geometry with the previous complete scanout.
 The hashing does not modify VRAM, PIT, IRQ0, VGA settings, source pixels or
 presentation controls. Pause-time synthetic repaints and aborted scanouts
 are excluded. It does add some CPU load while tracing is enabled.
@@ -124,7 +127,7 @@ are excluded. It does add some CPU load while tracing is enabled.
 | `host_elapsed_ms` | Monotonic real time since the first trace frame |
 | `scanout_interval_emulated_ms` | Time between this and prior completed scanout, emulated |
 | `scanout_interval_host_ms` | Same interval on the real host clock |
-| `changed` | 1 when the source image, used palette, or geometry changed |
+| `changed` | 1 when the RGB-equivalent source image or geometry changed |
 | `pixels_changed` | 1 when source pixel bytes differ from previous scanout |
 | `visible_palette_changed` | 1 when used palette RGB fingerprint differs |
 | `geometry_changed` | 1 on resolution, pitch, or pixel format change |
@@ -132,7 +135,7 @@ are excluded. It does add some CPU load while tracing is enabled.
 | `change_interval_emulated_ms` | Time since the preceding changed image, or 0 if unchanged / first |
 | `change_interval_host_ms` | Same visual-change interval on host clock |
 | `width`, `height`, `pixel_format` | Source frame geometry and pixel format enum |
-| `pixel_hash`, `visible_palette_hash` | 64-bit fingerprints in hexadecimal; **not** original image contents |
+| `pixel_hash`, `visible_palette_hash`, `visible_hash` | 64-bit hexadecimal fingerprints of raw bytes, used colours, and RGB-equivalent image respectively; **not** original image contents |
 
 Interpretation:
 
@@ -147,7 +150,9 @@ Interpretation:
 - Exclude the loading screen and mode transitions from gameplay statistics.
 - A changed source image need not mean a game-logic update: HUD changes,
   palette animation, and different portions of a scroll are counted as image
-  changes. Hash collisions are theoretically possible but extremely unlikely.
+  changes. `pixels_changed=1` alone is **not** proof of a visually changed
+  image when indexed colours map to identical RGB. Hash collisions are
+  theoretically possible but extremely unlikely.
 - Hashes represent sampled source scanout images, *not* GPU swaps, desktop
   compositor timing, monitor presentation, or when the game wrote pixels to
   video memory. Separating actual simulation ticks would require an
