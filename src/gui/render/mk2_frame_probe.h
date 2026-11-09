@@ -5,6 +5,7 @@
 #define DOSBOX_MK2_FRAME_PROBE_H
 
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -101,6 +102,55 @@ public:
         const bool changed = geometry_changed || !have_previous ||
                              visible_hash != previous_visible_hash;
 
+        // Localize visible changes to an 8x5 grid. Bit N of the mask
+        // corresponds to (row=N/8, column=N%8), top-left first.
+        // Each region is independently hashed; no VRAM or pixel writes.
+        // The source cache has tightly packed rows for the supported
+        // 1/2/3/4-byte pixel formats (pitch = width * bytes_per_pixel).
+        std::array<uint64_t, 40> region_hashes = {};
+        uint64_t region_mask = 0;
+        const bool regions_valid = (pitch % width == 0) &&
+                                   (pitch / width >= 1) &&
+                                   (pitch / width <= 4);
+        if (regions_valid) {
+            const auto bytes_per_pixel = pitch / width;
+            for (int tile_y = 0; tile_y < 5; ++tile_y) {
+                const auto first_y = tile_y * height / 5;
+                const auto end_y = (tile_y + 1) * height / 5;
+                for (int tile_x = 0; tile_x < 8; ++tile_x) {
+                    const auto first_x = tile_x * width / 8;
+                    const auto end_x = (tile_x + 1) * width / 8;
+                    const auto tile = static_cast<std::size_t>(tile_y * 8 + tile_x);
+                    auto hash = FnvOffset;
+                    for (int y = first_y; y < end_y; ++y) {
+                        const auto row = pixels +
+                                static_cast<std::size_t>(y) *
+                                static_cast<std::size_t>(pitch);
+                        for (int x = first_x; x < end_x; ++x) {
+                            const auto p = row +
+                                    static_cast<std::size_t>(x) *
+                                    static_cast<std::size_t>(bytes_per_pixel);
+                            if (indexed8 && palette) {
+                                const auto& rgb = palette[p[0]];
+                                hash = (hash ^ rgb.red) * FnvPrime;
+                                hash = (hash ^ rgb.green) * FnvPrime;
+                                hash = (hash ^ rgb.blue) * FnvPrime;
+                            } else {
+                                for (int byte = 0; byte < bytes_per_pixel; ++byte) {
+                                    hash = (hash ^ p[byte]) * FnvPrime;
+                                }
+                            }
+                        }
+                    }
+                    region_hashes[tile] = hash;
+                    if (geometry_changed || !previous_regions_valid ||
+                        hash != previous_region_hashes[tile]) {
+                        region_mask |= uint64_t{1} << tile;
+                    }
+                }
+            }
+        }
+
         const auto host_elapsed_ms =
                 std::chrono::duration<double, std::milli>(host_now - start_host).count();
         const auto scanout_interval_emulated_ms =
@@ -146,7 +196,10 @@ public:
                << std::hex << std::setfill('0') << std::setw(16) << pixel_hash
                << ',' << std::setw(16) << visible_palette_hash
                << ',' << std::setw(16) << visible_hash
-               << std::dec << std::setfill(' ') << '\n';
+               << ',' << std::setw(10) << region_mask
+               << std::dec << std::setfill(' ')
+               << ',' << std::popcount(region_mask)
+               << ',' << static_cast<int>(regions_valid) << '\n';
 
         // Keep the file observable during gameplay without flushing on every
         // 70 Hz scanout. Normal stream destruction flushes remaining rows.
@@ -163,6 +216,10 @@ public:
         previous_pixel_hash = pixel_hash;
         previous_palette_hash = visible_palette_hash;
         previous_visible_hash = visible_hash;
+        previous_regions_valid = regions_valid;
+        if (regions_valid) {
+            previous_region_hashes = region_hashes;
+        }
         have_previous = true;
     }
 
@@ -201,7 +258,8 @@ private:
                   "changed,pixels_changed,visible_palette_changed,"
                   "geometry_changed,consecutive_repeats,"
                   "change_interval_emulated_ms,change_interval_host_ms,"
-                  "width,height,pixel_format,pixel_hash,visible_palette_hash,visible_hash\n";
+                  "width,height,pixel_format,pixel_hash,visible_palette_hash,visible_hash,"
+                  "region_mask,regions_changed,regions_valid\n";
         enabled = true;
         start_host = Clock::now();
     }
@@ -220,6 +278,8 @@ private:
     uint64_t previous_pixel_hash = 0;
     uint64_t previous_palette_hash = 0;
     uint64_t previous_visible_hash = 0;
+    std::array<uint64_t, 40> previous_region_hashes = {};
+    bool previous_regions_valid = false;
     int previous_width = 0;
     int previous_height = 0;
     int previous_pitch = 0;
