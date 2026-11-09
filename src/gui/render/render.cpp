@@ -21,7 +21,9 @@
 #include "gui/mapper.h"
 #include "gui/private/window_geometry.h"
 #include "gui/render/render.h"
+#include "gui/render/mk2_frame_probe.h"
 #include "gui/render/render_backend.h"
+#include "hardware/pic.h"
 #include "hardware/video/vga.h"
 #include "misc/notifications.h"
 #include "misc/support.h"
@@ -400,6 +402,23 @@ void RENDER_EndUpdate(const bool abort)
 	// fresh frame, not the previous one.
 	if (!abort) {
 		latch_last_complete_source();
+
+		// Experimental, opt-in visual frame pacing telemetry. The latched
+		// source image is complete at this point, and contains unscaled
+		// emulated pixels (not GPU output). Exclude pause-time rescale
+		// repaints, which are not new game frames.
+		if (DOSBOX_IsRunning()) {
+			const auto& source = render.last_complete_source;
+			Mk2FrameProbe::Get().OnCompletedScanout(
+			        PIC_FullIndex(),
+			        reinterpret_cast<const uint8_t*>(source.cache.data()),
+			        source.src.width,
+			        source.src.height,
+			        source.pitch,
+			        static_cast<int>(source.src.pixel_format),
+			        source.src.pixel_format == PixelFormat::Indexed8,
+			        source.palette.rgb.data());
+		}
 	}
 
 	// Two gates on captures:
