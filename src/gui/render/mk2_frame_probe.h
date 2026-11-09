@@ -47,14 +47,25 @@ public:
                           static_cast<size_t>(height);
 
         uint64_t pixel_hash = FnvOffset;
+        uint64_t visible_hash = FnvOffset;
         std::array<bool, 256> used_palette_entries = {};
 
         for (size_t i = 0; i < size; ++i) {
             const auto value = pixels[i];
             pixel_hash = (pixel_hash ^ value) * FnvPrime;
-            if (indexed8) {
+            if (indexed8 && palette) {
                 used_palette_entries[value] = true;
+                // Hash the *actual RGB value* of each indexed pixel. Two
+                // different palette indices can map to the same visible RGB
+                // colour, so raw index changes alone are not sufficient.
+                const auto& rgb = palette[value];
+                visible_hash = (visible_hash ^ rgb.red) * FnvPrime;
+                visible_hash = (visible_hash ^ rgb.green) * FnvPrime;
+                visible_hash = (visible_hash ^ rgb.blue) * FnvPrime;
             }
+        }
+        if (!indexed8 || !palette) {
+            visible_hash = pixel_hash;
         }
 
         uint64_t visible_palette_hash = 0;
@@ -85,8 +96,10 @@ public:
                                     pixel_hash != previous_pixel_hash;
         const bool visible_palette_changed = !have_previous ||
                                              visible_palette_hash != previous_palette_hash;
-        const bool changed = geometry_changed || pixels_changed ||
-                             visible_palette_changed;
+        // Count changes in *visible image data*, not merely changes in raw
+        // palette indices or unused palette entries.
+        const bool changed = geometry_changed || !have_previous ||
+                             visible_hash != previous_visible_hash;
 
         const auto host_elapsed_ms =
                 std::chrono::duration<double, std::milli>(host_now - start_host).count();
@@ -132,6 +145,7 @@ public:
                << width << ',' << height << ',' << pixel_format << ','
                << std::hex << std::setfill('0') << std::setw(16) << pixel_hash
                << ',' << std::setw(16) << visible_palette_hash
+               << ',' << std::setw(16) << visible_hash
                << std::dec << std::setfill(' ') << '\n';
 
         // Keep the file observable during gameplay without flushing on every
@@ -148,6 +162,7 @@ public:
         previous_pixel_format = pixel_format;
         previous_pixel_hash = pixel_hash;
         previous_palette_hash = visible_palette_hash;
+        previous_visible_hash = visible_hash;
         have_previous = true;
     }
 
@@ -186,7 +201,7 @@ private:
                   "changed,pixels_changed,visible_palette_changed,"
                   "geometry_changed,consecutive_repeats,"
                   "change_interval_emulated_ms,change_interval_host_ms,"
-                  "width,height,pixel_format,pixel_hash,visible_palette_hash\n";
+                  "width,height,pixel_format,pixel_hash,visible_palette_hash,visible_hash\n";
         enabled = true;
         start_host = Clock::now();
     }
@@ -204,6 +219,7 @@ private:
     uint64_t consecutive_repeats = 0;
     uint64_t previous_pixel_hash = 0;
     uint64_t previous_palette_hash = 0;
+    uint64_t previous_visible_hash = 0;
     int previous_width = 0;
     int previous_height = 0;
     int previous_pitch = 0;
