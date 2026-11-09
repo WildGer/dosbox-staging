@@ -11,6 +11,7 @@
 #include "hardware/pic.h"
 #include "hardware/port.h"
 #include "hardware/timer.h"
+#include "hardware/mk2_timing_probe.h"
 
 // PIC Controllers
 // ~~~~~~~~~~~~~~~
@@ -379,6 +380,7 @@ static void secondary_startIRQ()
 
 static void inline primary_startIRQ(uint8_t i)
 {
+	if (i == 0) { Mk2TimingProbe::Get().OnIrq0Dispatch(); }
 	primary_controller.start_irq(i);
 	CPU_HW_Interrupt(primary_controller.vector_base + i);
 }
