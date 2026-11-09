@@ -172,8 +172,10 @@ private:
                                         ? dot
                                         : trace_path.size();
         const std::string frame_path = trace_path.substr(0, insert_pos) +
-                                       "_frames.csv" +
-                                       trace_path.substr(insert_pos);
+                                       "_frames" +
+                                       (insert_pos < trace_path.size()
+                                                ? trace_path.substr(insert_pos)
+                                                : ".csv");
 
         output.open(frame_path, std::ios::out | std::ios::trunc);
         if (!output.is_open()) {
