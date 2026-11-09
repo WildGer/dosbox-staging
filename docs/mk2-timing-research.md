@@ -41,7 +41,10 @@ $env:DOSBOX_MK2_TRACE = "C:\MK2Captures\mk2_40000.csv"
 
 The trace starts automatically when DOSBox runs. Start MK2, let a fight run for
 20-30 seconds, then exit DOSBox. A new row is written per ~1 emulated second,
-and flushed to disk. Recording video is **not required** to collect the CSV.
+and flushed to disk **from the core millisecond ticker**, not from the VGA
+vertical refresh callback. This keeps logging when VGA output changes mode or
+stops sending refresh callbacks. Recording video is **not required** to collect
+the CSV.
 
 If `DOSBOX_MK2_TRACE` is unset or set to `0`, the trace stays disabled.
 Set it to `1` for `mk2_timing.csv` in the working directory, or set an
@@ -119,3 +122,22 @@ If the game never reaches its expected emulated frame rates, compare
 the emulated interval may not keep up. If rates remain consistent at all three
 cycle settings, the next step is instrumenting the game's simulation-update
 routine, **not** changing PIT or VGA timing blindly.
+
+## Direct launch without DOS MOUNT commands
+
+DOSBox Staging accepts a host-side `.EXE` path as a **positional argument**;
+it mounts the containing directory as C: and runs the executable automatically.
+This is preferable to quoting `MOUNT` inside repeated `-c` arguments.
+
+From PowerShell after rebuilding the latest branch, set the environment variable
+and run your compiled DOSBox with an absolute `MK2.EXE` path:
+
+```powershell
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\\Documents\\MK2Timing\\mk2_40000.csv"
+& 'C:\\Users\\Usuario\\Documents\\dosbox-staging\\build\\release-windows\\dosbox.exe' --noautoexec --set 'cpu_cycles_protected=40000' 'D:\\GoG\\Mortal Kombat 2\\MK2.EXE'
+```
+
+Adjust the actual executable locations. The destination directory must exist.
+If the CSV has only the header or unexpectedly few rows, compare the emitted
+`window_host_ms` and `window_emulated_ms` values, and ensure the executable
+was rebuilt with the latest `mk2-timing-research` commits.
