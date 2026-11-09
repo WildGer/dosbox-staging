@@ -1,6 +1,6 @@
 # MK2 DOS timing research (experimental)
 
-This fork includes **opt-in, low-volume CSV telemetry** to investigate why
+This fork includes **opt-in CSV telemetry** to investigate why
 *Mortal Kombat II* for MS-DOS appears less fluid than MK1/MK3.
 
 **No MK2 executable or game data is included or modified.**
@@ -40,15 +40,16 @@ $env:DOSBOX_MK2_TRACE = "C:\MK2Captures\mk2_40000.csv"
 ```
 
 The trace starts automatically when DOSBox runs. Start MK2, let a fight run for
-20-30 seconds, then exit DOSBox. A new row is written per ~1 emulated second,
+20-30 seconds, then exit DOSBox. The PIT/VGA summary file gets a row per ~1 emulated second,
 and flushed to disk **from the core millisecond ticker**, not from the VGA
 vertical refresh callback. This keeps logging when VGA output changes mode or
 stops sending refresh callbacks. Recording video is **not required** to collect
 the CSV.
 
-If `DOSBOX_MK2_TRACE` is unset or set to `0`, the trace stays disabled.
-Set it to `1` for `mk2_timing.csv` in the working directory, or set an
-absolute filename as shown above. The folder must already exist.
+If `DOSBOX_MK2_TRACE` is unset or set to `0`, both trace streams stay disabled.
+Set it to `1` for `mk2_timing.csv` plus `mk2_timing_frames.csv` in the
+working directory, or set an absolute filename as shown above. The folder must
+already exist. With `mk2_40000.csv`, the second file is `mk2_40000_frames.csv`.
 
 ## Suggested tests
 
@@ -70,7 +71,7 @@ the full CSV: the early rows may show DOS at ~18.2 Hz and later rows MK2 at
 | Field | Meaning |
 |---|---|
 | `emulated_ms` | Time on DOSBox's emulated PIC clock at end of window |
-| `host_elapsed_ms` | Real monotonic time since first VGA refresh observed |
+| `host_elapsed_ms` | Real monotonic time since the first emulated clock tick observed |
 | `window_emulated_ms` | Length of reporting window in emulated time |
 | `window_host_ms` | Real time consumed by the same window |
 | `pit0_events` | Number of PIT channel 0 scheduled events (not necessarily delivered IRQs) |
@@ -95,6 +96,66 @@ The code records **scheduled PIT0 events vs. dispatched IRQ0 interrupts**
 separately, so a masked/pending interrupt cannot be mistaken for a game tick.
 It does **not** yet prove that MK2's IRQ handler runs once per simulation tick.
 
+## Source scanout frame pacing (`*_frames.csv`)
+
+A separate CSV now captures **every completed, non-aborted source scanout**,
+just after the renderer latches its complete source frame. The timestamp is
+taken **before hashing**. This is an emulated/renderer boundary, not a
+measurement of what the monitor physically displayed or of the moment the
+game wrote to VRAM.
+
+For each scanout, the probe computes:
+
+- An FNV-1a fingerprint of the source pixel data.
+- For indexed 8-bit frames, a separate fingerprint of the RGB values of **only
+  the palette entries used by the current source pixels**. A changed but
+  unused palette entry does not count as a new visible image.
+- Changes to frame geometry (width/height/pitch/pixel format).
+
+Changes are determined by comparing the new scanout with the previous one.
+The hashing does not modify VRAM, PIT, IRQ0, VGA settings, source pixels or
+presentation controls. Pause-time synthetic repaints and aborted scanouts
+are excluded. It does add some CPU load while tracing is enabled.
+
+| Column | Meaning |
+|---|---|
+| `scanout_index` | Completed source scanout sequence number |
+| `emulated_ms` | PIC emulated clock timestamp in milliseconds, with fractional precision |
+| `host_elapsed_ms` | Monotonic real time since the first trace frame |
+| `scanout_interval_emulated_ms` | Time between this and prior completed scanout, emulated |
+| `scanout_interval_host_ms` | Same interval on the real host clock |
+| `changed` | 1 when the source image, used palette, or geometry changed |
+| `pixels_changed` | 1 when source pixel bytes differ from previous scanout |
+| `visible_palette_changed` | 1 when used palette RGB fingerprint differs |
+| `geometry_changed` | 1 on resolution, pitch, or pixel format change |
+| `consecutive_repeats` | Count of consecutive identical source scanouts after last change |
+| `change_interval_emulated_ms` | Time since the preceding changed image, or 0 if unchanged / first |
+| `change_interval_host_ms` | Same visual-change interval on host clock |
+| `width`, `height`, `pixel_format` | Source frame geometry and pixel format enum |
+| `pixel_hash`, `visible_palette_hash` | 64-bit fingerprints in hexadecimal; **not** original image contents |
+
+Interpretation:
+
+- Count changed frames per **emulated second**, then separately compare the
+  **host** change intervals. A 70 Hz scanout can contain repeated images.
+- For a 60 Hz source shown by a 70 Hz scanout, expect repeated images at
+  intervals, but **do not presume** that the game necessarily generates
+  60 distinct images per second.
+- For repeated captures, compare the distribution of nonzero
+  `change_interval_emulated_ms` (median, p95/p99, repeated scanout runs),
+  not just average changed frames/sec.
+- Exclude the loading screen and mode transitions from gameplay statistics.
+- A changed source image need not mean a game-logic update: HUD changes,
+  palette animation, and different portions of a scroll are counted as image
+  changes. Hash collisions are theoretically possible but extremely unlikely.
+- Hashes represent sampled source scanout images, *not* GPU swaps, desktop
+  compositor timing, monitor presentation, or when the game wrote pixels to
+  video memory. Separating actual simulation ticks would require an
+  additional instrumentation stage.
+
+The frame CSV is written next to the existing PIT/VGA CSV, using the same
+environment variable and launch script. No new switch is required.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -102,6 +163,8 @@ It does **not** yet prove that MK2's IRQ handler runs once per simulation tick.
 - `src/hardware/video/vga_misc.cpp`: port 3DAh reads and vertical retrace bit.
 - `src/hardware/video/vga_draw.cpp`: one call per emulated vertical refresh.
 - `src/hardware/mk2_timing_probe.h`: low-overhead counters and CSV writer.
+- `src/gui/render/render.cpp`: completed source-frame sampling after source latch.
+- `src/gui/render/mk2_frame_probe.h`: frame and visible-palette fingerprints, per-scanout CSV.
 
 The instrumentation is global to DOSBox when enabled, not tied to an MK2
 executable hash. Use it for MK1/MK3 comparisons too. Avoid treating the
@@ -109,12 +172,14 @@ early DOS prompt rows as MK2 gameplay measurements.
 
 ## Validation and limits
 
-The standalone CSV helper has been syntax-compiled and exercised with a
-small C++20 harness. **The full DOSBox build and MK2 runtime integration
-still require validation on the Windows machine.**
+The PIT/VGA CSV implementation was previously built and exercised by the user
+on Windows. **The newly added frame probe has not yet been compiled or
+runtime-validated on the user's Windows machine.**
 
-Trace overhead is minimized by counting in hot paths and writing approximately
-once per emulated second, but nonzero measurement overhead remains. Always run
+Time-counter overhead is minimized by counting in hot paths and writing once
+per emulated second. Frame tracing adds one source-buffer fingerprint per
+completed scanout (typically ~70 per second), and buffers CSV writes;
+nonzero measurement overhead remains. Always run
 a control test without tracing to check for behavioral changes.
 
 If the game never reaches its expected emulated frame rates, compare
@@ -133,8 +198,8 @@ From PowerShell after rebuilding the latest branch, set the environment variable
 and run your compiled DOSBox with an absolute `MK2.EXE` path:
 
 ```powershell
-$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\\Documents\\MK2Timing\\mk2_40000.csv"
-& 'C:\\Users\\Usuario\\Documents\\dosbox-staging\\build\\release-windows\\dosbox.exe' --noautoexec --set 'cpu_cycles_protected=40000' 'D:\\GoG\\Mortal Kombat 2\\MK2.EXE'
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_40000.csv"
+& 'C:\Users\Usuario\Documents\dosbox-staging\build\release-windows\dosbox.exe' --noautoexec --set 'cpu_cycles_protected=40000' 'D:\GoG\Mortal Kombat 2\MK2.EXE'
 ```
 
 Adjust the actual executable locations. The destination directory must exist.
