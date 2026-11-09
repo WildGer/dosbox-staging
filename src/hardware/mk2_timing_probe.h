@@ -48,20 +48,29 @@ public:
 		if (status & 0x08) { ++status_vsync_high; }
 	}
 
-	// PIC_FullIndex() returns emulated milliseconds.
-	void OnVgaFrame(const double emulated_ms)
+	// Count VGA vertical events without depending on them for CSV flushes.
+	// In some modes there may be no VGA event while the CPU keeps running.
+	void OnVgaFrame(const double /*emulated_ms*/)
+	{
+		if (enabled) { ++vga_frames; }
+	}
+
+	// Called once per emulated millisecond by DOSBox's main timer loop.
+	// The trace continues even if the VGA callback is inactive.
+	void OnClockTick(const double emulated_ms)
 	{
 		if (!enabled) { return; }
-		const auto host_now = Clock::now();
 		if (!started) {
 			started = true;
 			window_start_emulated_ms = emulated_ms;
-			window_start_host = host_now;
-			start_host = host_now;
+			window_start_host = Clock::now();
+			start_host = window_start_host;
+			return;
 		}
-		++vga_frames;
 		const auto elapsed_ms = emulated_ms - window_start_emulated_ms;
 		if (elapsed_ms < 1000.0) { return; }
+
+		const auto host_now = Clock::now();
 		const auto host_window_ms =
 		        std::chrono::duration<double, std::milli>(host_now - window_start_host).count();
 		const auto host_total_ms =
