@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "audio/mixer.h"
+#include "hardware/mk2_timing_probe.h"
 #include "hardware/memory.h"
 #include "hardware/pic.h"
 #include "hardware/port.h"
@@ -169,6 +170,7 @@ constexpr int update_channel_delay(PIT_Block& channel)
 
 static void PIT0_Event(uint32_t /*val*/)
 {
+	Mk2TimingProbe::Get().OnPit0Event();
 	PIC_ActivateIRQ(0);
 
 	if (channel_0.mode != PitMode::InterruptOnTerminalCount) {
@@ -416,6 +418,9 @@ static void write_latch(io_port_t port, io_val_t value, io_width_t)
 
 		switch (channel_num) {
 		case 0: // Timer hooked to IRQ 0
+			Mk2TimingProbe::Get().OnPit0Program(
+			        static_cast<uint32_t>(channel.count),
+			        1000.0 / channel.delay);
 			if (channel.mode_changed ||
 			    channel.mode == PitMode::InterruptOnTerminalCount) {
 				if (channel.mode ==
