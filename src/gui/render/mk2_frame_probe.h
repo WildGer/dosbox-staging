@@ -43,14 +43,14 @@ public:
 
         // Capture the timestamp BEFORE doing the hashing work.
         const auto host_now = Clock::now();
-        const auto size = static_cast<size_t>(pitch) *
-                          static_cast<size_t>(height);
+        const auto size = static_cast<std::size_t>(pitch) *
+                          static_cast<std::size_t>(height);
 
         uint64_t pixel_hash = FnvOffset;
         uint64_t visible_hash = FnvOffset;
         std::array<bool, 256> used_palette_entries = {};
 
-        for (size_t i = 0; i < size; ++i) {
+        for (std::size_t i = 0; i < size; ++i) {
             const auto value = pixels[i];
             pixel_hash = (pixel_hash ^ value) * FnvPrime;
             if (indexed8 && palette) {
@@ -71,7 +71,7 @@ public:
         uint64_t visible_palette_hash = 0;
         if (indexed8 && palette) {
             visible_palette_hash = FnvOffset;
-            for (size_t i = 0; i < used_palette_entries.size(); ++i) {
+            for (std::size_t i = 0; i < used_palette_entries.size(); ++i) {
                 if (!used_palette_entries[i]) {
                     continue;
                 }
