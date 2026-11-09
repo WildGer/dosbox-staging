@@ -28,6 +28,11 @@ public:
 		if (enabled) { ++pit0_events; }
 	}
 
+	void OnIrq0Dispatch()
+	{
+		if (enabled) { ++irq0_dispatches; }
+	}
+
 	void OnPit0Program(const uint32_t divisor, const double frequency_hz)
 	{
 		if (!enabled) { return; }
@@ -62,17 +67,20 @@ public:
 		const auto host_total_ms =
 		        std::chrono::duration<double, std::milli>(host_now - start_host).count();
 		const auto pit_hz = 1000.0 * static_cast<double>(pit0_events) / elapsed_ms;
+		const auto irq_hz = 1000.0 * static_cast<double>(irq0_dispatches) / elapsed_ms;
 		const auto vga_hz = 1000.0 * static_cast<double>(vga_frames) / elapsed_ms;
 
 		output << std::fixed << std::setprecision(3) << emulated_ms << ','
 		       << host_total_ms << ',' << elapsed_ms << ',' << host_window_ms << ','
-		       << pit0_events << ',' << pit_hz << ',' << vga_frames << ','
+		       << pit0_events << ',' << pit_hz << ','
+		       << irq0_dispatches << ',' << irq_hz << ',' << vga_frames << ','
 		       << vga_hz << ',' << status_reads << ',' << status_vsync_high << ','
 		       << pit0_divisor << ',' << pit0_programmed_hz << ','
 		       << pit0_programs << '\n';
 		output.flush();
 
 		pit0_events = 0;
+		irq0_dispatches = 0;
 		vga_frames = 0;
 		status_reads = 0;
 		status_vsync_high = 0;
@@ -95,7 +103,8 @@ private:
 		output.open(filename, std::ios::out | std::ios::trunc);
 		if (!output.is_open()) { return; }
 		output << "emulated_ms,host_elapsed_ms,window_emulated_ms,window_host_ms,"
-		          "pit0_events,pit0_measured_hz,vga_refreshes,vga_measured_hz,"
+		          "pit0_events,pit0_measured_hz,irq0_dispatches,irq0_measured_hz,"
+		          "vga_refreshes,vga_measured_hz,"
 		          "vga_3da_reads,vga_3da_vsync_high,pit0_divisor,"
 		          "pit0_programmed_hz,pit0_programs\n";
 		enabled = true;
@@ -108,6 +117,7 @@ private:
 	Clock::time_point window_start_host = {};
 	double window_start_emulated_ms = 0.0;
 	uint64_t pit0_events = 0;
+	uint64_t irq0_dispatches = 0;
 	uint64_t vga_frames = 0;
 	uint64_t status_reads = 0;
 	uint64_t status_vsync_high = 0;
