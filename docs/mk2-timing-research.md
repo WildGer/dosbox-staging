@@ -136,6 +136,9 @@ are excluded. It does add some CPU load while tracing is enabled.
 | `change_interval_host_ms` | Same visual-change interval on host clock |
 | `width`, `height`, `pixel_format` | Source frame geometry and pixel format enum |
 | `pixel_hash`, `visible_palette_hash`, `visible_hash` | 64-bit hexadecimal fingerprints of raw bytes, used colours, and RGB-equivalent image respectively; **not** original image contents |
+| `region_mask` | 40-bit hexadecimal mask: 8 columns x 5 rows, bit 0 top-left, bit 39 bottom-right; one bit per region whose pixels changed |
+| `regions_changed` | Number of changed grid cells, 0–40 |
+| `regions_valid` | 1 when region fingerprinting supports the source pixel layout, otherwise 0 (ignore mask) |
 
 Interpretation:
 
@@ -161,6 +164,40 @@ Interpretation:
 The frame CSV is written next to the existing PIT/VGA CSV, using the same
 environment variable and launch script. No new switch is required.
 
+### Regional follow-up: 8x5 changes
+
+The frame trace now adds a 40-bit `region_mask` for each completed
+source scanout. This divides the frame into **8 columns by 5 rows**.
+
+```text
++--+--+--+--+--+--+--+--+
+|00|01|02|03|04|05|06|07|  top row
++--+--+--+--+--+--+--+--+
+|08|09|10|11|12|13|14|15|
++--+--+--+--+--+--+--+--+
+|16|17|18|19|20|21|22|23|
++--+--+--+--+--+--+--+--+
+|24|25|26|27|28|29|30|31|
++--+--+--+--+--+--+--+--+
+|32|33|34|35|36|37|38|39|  bottom row
++--+--+--+--+--+--+--+--+
+```
+
+For example, `region_mask=0000000001` means only the top-left cell
+changed; `0000000100` means only cell 8 changed (leftmost cell in
+the second row). A 320x200 source frame uses roughly 40x40-pixel cells.
+
+A regional change is based on RGB colours for Indexed8 and on source
+pixel bytes for other supported packed formats. The implementation runs
+only when `DOSBOX_MK2_TRACE` is enabled and does not alter frame output.
+The 8x5 region probe adds **another read-only pass** across source
+pixels, so check observer overhead if results are unexpectedly different.
+
+To study whether the 3-1-1-2 sequence is produced by changes across
+the entire image or particular characters/background elements, compare
+the `region_mask` across successive `changed=1` rows. No image
+content or game executable is exported.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -182,7 +219,7 @@ on Windows. **The newly added frame probe has not yet been compiled or
 runtime-validated on the user's Windows machine.**
 
 Time-counter overhead is minimized by counting in hot paths and writing once
-per emulated second. Frame tracing adds one source-buffer fingerprint per
+per emulated second. Frame tracing adds source-buffer and per-region fingerprints for each
 completed scanout (typically ~70 per second), and buffers CSV writes;
 nonzero measurement overhead remains. Always run
 a control test without tracing to check for behavioral changes.
