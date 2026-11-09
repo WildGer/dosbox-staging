@@ -15,6 +15,7 @@
 #include "gui/common.h"
 #include "gui/render/render.h"
 #include "gui/render/scaler/scalers.h"
+#include "hardware/mk2_timing_probe.h"
 #include "hardware/pic.h"
 #include "hardware/video/reelmagic/reelmagic.h"
 #include "ints/int10.h"
@@ -1406,6 +1407,7 @@ static void VGA_PanningLatch(uint32_t /*val*/)
 static void VGA_VerticalTimer(uint32_t /*val*/)
 {
 	vga.draw.delay.framestart = PIC_FullIndex();
+	Mk2TimingProbe::Get().OnVgaFrame(vga.draw.delay.framestart);
 	PIC_AddEvent(VGA_VerticalTimer, vga.draw.delay.vtotal);
 
 	switch (machine) {
