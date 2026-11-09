@@ -611,6 +611,7 @@ void TIMER_AddTick(void) {
 	CPU_CycleLeft=CPU_CycleMax;
 	CPU_Cycles=0;
 	PIC_Ticks++;
+	Mk2TimingProbe::Get().OnClockTick(static_cast<double>(PIC_Ticks));
 	/* Go through the list of scheduled events and lower their index with 1000 */
 	PICEntry * entry=pic_queue.next_entry;
 	while (entry) {
