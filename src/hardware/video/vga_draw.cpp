@@ -18,6 +18,7 @@
 #include "hardware/mk2_timing_probe.h"
 #include "hardware/mk2_vram_probe.h"
 #include "hardware/mk2_vga_regs_probe.h"
+#include "hardware/mk2_scanmem_probe.h"
 #include "hardware/pic.h"
 #include "hardware/video/reelmagic/reelmagic.h"
 #include "ints/int10.h"
@@ -1647,6 +1648,10 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 		}
 		break;
 	}
+
+	// The source scanout has started and its VGA draw-source selection is
+	// complete. Read backing memory before the scheduled scanlines execute.
+	Mk2ScanmemProbe::Get().OnBegin(PIC_FullIndex());
 }
 
 void VGA_CheckScanLength(void)
