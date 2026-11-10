@@ -1102,25 +1102,98 @@ may also help if unusual PC contexts are observed. Do not label a
 writer as the MK2 simulation tick until its code and the related
 actual game-state changes have been verified.
 
+## First producer-watch capture: 6,990 clears, no observed producer (2026-11-10)
+
+The user ran the original `*_signal.csv` analyzer after a
+`core=normal` MK2 trace with the separate writer watch enabled.
+Raw CSV has **not** been provided in this turn, so this section
+is grounded in the user's **analyzer stdout** rather than
+independent reanalysis of event timestamps.
+
+| Output item | Observed |
+|---|---:|
+| Total CSV rows | **6,991** |
+| `resolve` events | **1** |
+| `signal_write` events | **6,990** |
+| Unique writer CS:EIP | **0180:002054AD** (6,990 rows) |
+| Runtime pointer | **0x00009B00** |
+| Watched linear address | **0x00009B24** |
+| Observed `0 -> nonzero` transitions | **0** |
+| Observed `nonzero -> 0` clears | **6,990** |
+| Reset spacing (median) | **16.652 ms** |
+| Reset spacing (min / max) | **3.613 / 172.827 ms** |
+
+**Confirmed:** `0x2054AD` is precisely the `mov dword
+[esi+0x24], 0` instruction seen in the previous 64-byte
+disassembly. Thus the probe correctly detects MK2 clearing the
+nonzero signal after leaving the waiting loop. The approximately
+16.65-ms reset interval is consistent with PIT0's ~60.052-Hz
+period. It does **not** demonstrate that each clear is a combat
+simulation update or that all clears are exactly PIT driven.
+The recorded DS-based target happens to be 0x9B24 in this session.
+
+**Not observed:** Any positive store to the watched DWORD. The
+first version of the probe restricted write observations to
+**protected mode with `cpudecoder == CPU_Core_Normal_Run`**.
+That can exclude writes performed by BIOS/interrupt/DOS-extender
+code in real mode or under a different decoder. Other possible
+explanations include aliased memory or writes through direct
+host-backed memory paths. The absence of a producer in the
+first log is an **instrumentation coverage gap**, not a
+demonstration that the producer does not exist.
+
+### Correction committed on branch: broader watch + bounded opcode snapshots
+
+The following changes are committed but **not yet built/runtime
+validated on the user's Windows machine**:
+
+- `src/hardware/mk2_signal_probe.h`: When the address has been
+  resolved from the known consumer, the guest-write hook now checks
+  stores overlapping the resolved signal/pointer **regardless of
+  current CPU mode or decoder**. It still logs actual before/after
+  DWORD values and writer CS:EIP.
+- `src/cpu/core_normal.cpp`: An opt-in branch at the start of an
+  interpreted instruction calls a bounded memory comparison.
+  **Approximately every 60th IRQ0** that interrupts the known wait
+  loop arms **up to 16,000 interpreted instructions**. It compares
+  the watched DWORD at successive instruction boundaries. A change
+  yields a new `opcode_transition` event with the preceding
+  instruction's CS:EIP and the before/after values. Monitoring
+  stops early after detecting `0 -> nonzero`.
+- `src/hardware/pic.cpp`: Exposes the opt-in instruction-watch
+  callback and boolean flag (false when not armed). The existing
+  pre-IRQ0 resolver arms bounded windows.
+- `scripts/analyze_mk2_signal_trace.py`: Reports transitions
+  **separately by direct store or opcode-boundary observation**.
+  A transition can appear in both mechanisms; **do not add
+  their counts together**.
+
+These changes **do not modify the original MK2 executable, memory,
+PIT IRQ schedule or VGA timings**. However, a per-instruction memory
+read incurs significant diagnostic overhead when armed: the next
+run must not be used for comparing host FPS or p99 frame pacing.
+The instruction-boundary PC is a *candidate* for an ordinary
+guest store and must be checked by disassembly; a host callback
+could also change memory between boundaries.
+
+### Next validation test
+
+Rebuild the latest `mk2-timing-research` using
+`cmake --build --preset=release-windows --parallel 8`.
+Run `core=normal` with **both**
+`DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`
+for active combat during emulated seconds 30–150.
+Collect **just the new `*_signal.csv` and the
+`scripts/analyze_mk2_signal_trace.py` stdout**.
+
+If positive transitions appear, examine their writer
+`CS:EIP` and inspect a tiny private instruction snippet
+around the producer. Only after confirming a routine that
+actually advances fighter positions, input state or combat
+animation should we implement a true game-logic tick counter.
+
 ## Context to restore in a new chat
 
-> Current MK2 DOS timing research in `WildGer/dosbox-staging`, branch `mk2-timing-research`: review `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz, VGA ~70.09 Hz; six video telemetry streams validated, 70,000 VGA/cache line hashes match, most previously unexplained source images reflect VRAM writes during earlier scanouts. The seventh guest CPU trace in dynamic and normal cores found 0180:00205489/8F/92/94 as a tight wait and 0180:002196D5 as VGA 3DAh wait. Actual private disassembly of six code snippets confirmed 0x205489 loads a pointer from `DS:[0x27177C]`, spins while `DWORD DS:[ESI+0x24]==0`, and then saves/clears the value; the producer is UNKNOWN. CS base was zero in samples; DS base has NOT been measured and must be resolved dynamically. Latest change (NOT YET BUILT ON WINDOWS): opt-in normal-core writer watch in `src/hardware/mk2_signal_probe.h`, enabled with BOTH `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`, hooks standard normal-core guest stores through `src/cpu/paging.h`, resolves DS pointer on pre-IRQ0 in the wait-loop, logs producer CS:EIP, old/new value and PIC time to `_signal.csv` during emulated 30–150s. Analyzer `scripts/analyze_mk2_signal_trace.py`. Next: compile, run 60+ emulated seconds of active combat with `core=normal`, upload `_signal.csv` plus analyzer output; identify the producer and disassemble it before asserting any real MK2 simulation tick. No MK2 assets/code bytes in GitHub. Do not modify PIT/VGA or game's executable.
+> Investigating **MK2 DOS** simulation vs VGA pacing, fork `WildGer/dosbox-staging` branch `mk2-timing-research`. Read `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. Earlier PIT0 ~60.052Hz / VGA ~70.09Hz, visual cadence 3-1-1-2, six image/scanout probes validated (70,000/70,000 VGA RGB lines agree with renderer cache). Dynamic/normal guest EIP research and six privately disassembled 64-byte code snippets established `0180:00205489` is a busy-wait reading DS:[ESI+0x24] with ESI from DS:[0x27177C], and `0x2054AD` clears the signal. `0x2196D5` reads VGA 0x3DA and conditionally updates DAC. Initial dedicated normal-core `_signal.csv` capture (user supplied analyzer stdout only) had **6,991 rows: 1 pointer resolve, 6,990 signal writes, all at `0180:002054AD` clearing nonzero->zero**, median interval **16.652 ms**, target linear address `0x9B24`, pointer value `0x9B00`. **ZERO positive writes were caught**, likely due to overly restrictive instrumentation, not evidence that the signal is never set. **LATEST UNTESTED PATCH** on branch: signal memory-write hooks no longer restrict to protected mode/normal decoder; a **bounded normal-core instruction-boundary comparison** samples up to 16,000 instructions following about every 60th IRQ0, enabled by `DOSBOX_MK2_SIGNAL_WATCH=1`, logs `opcode_transition` if value changes. `scripts/analyze_mk2_signal_trace.py` handles direct-store vs opcode events separately, avoiding double count. **NEXT:** build newest branch on Windows, capture normal-core MK2 at 40k cycles during seconds 30–150, upload new `_signal.csv` plus analyzer output to find producer PC. Do not identify a combat logic tick or change PIT/VGA timings until real state-update code has been verified. Do not commit MK2 executable/asset/code bytes to GitHub.
 
-**Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
-, '_signal.csv'
-Test-Path "$signalCsv"
-python scripts/analyze_mk2_signal_trace.py "$signalCsv"
-Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
-```
-
-Collect gameplay in the 30–150s emulated window, and upload
-`*_signal.csv` plus analyzer stdout. The existing `_guest.csv`
-may also help if unusual PC contexts are observed. Do not label a
-writer as the MK2 simulation tick until its code and the related
-actual game-state changes have been verified.
-
-## Context to restore in a new chat
-
-> Current MK2 DOS timing research in `WildGer/dosbox-staging`, branch `mk2-timing-research`: review `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz, VGA ~70.09 Hz; six video telemetry streams validated, 70,000 VGA/cache line hashes match, most previously unexplained source images reflect VRAM writes during earlier scanouts. The seventh guest CPU trace in dynamic and normal cores found 0180:00205489/8F/92/94 as a tight wait and 0180:002196D5 as VGA 3DAh wait. Actual private disassembly of six code snippets confirmed 0x205489 loads a pointer from `DS:[0x27177C]`, spins while `DWORD DS:[ESI+0x24]==0`, and then saves/clears the value; the producer is UNKNOWN. CS base was zero in samples; DS base has NOT been measured and must be resolved dynamically. Latest change (NOT YET BUILT ON WINDOWS): opt-in normal-core writer watch in `src/hardware/mk2_signal_probe.h`, enabled with BOTH `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`, hooks standard normal-core guest stores through `src/cpu/paging.h`, resolves DS pointer on pre-IRQ0 in the wait-loop, logs producer CS:EIP, old/new value and PIC time to `_signal.csv` during emulated 30–150s. Analyzer `scripts/analyze_mk2_signal_trace.py`. Next: compile, run 60+ emulated seconds of active combat with `core=normal`, upload `_signal.csv` plus analyzer output; identify the producer and disassemble it before asserting any real MK2 simulation tick. No MK2 assets/code bytes in GitHub. Do not modify PIT/VGA or game's executable.
-
-**Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
+**Raw CSVs are not in the repository.** Ask for the next `_signal.csv` if needed; don't infer unobserved rows.
