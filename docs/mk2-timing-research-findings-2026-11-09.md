@@ -1192,8 +1192,116 @@ around the producer. Only after confirming a routine that
 actually advances fighter positions, input state or combat
 animation should we implement a true game-logic tick counter.
 
+## Writer identified: MK2's work-ready flag is set at 09B0:08AF (2026-11-10 15:31)
+
+**Evidence:** user-supplied stdout from
+`mk2_normal_40000_20261110_153111_signal.csv`, analyzed by the
+revised `scripts/analyze_mk2_signal_trace.py`. The raw CSV was NOT
+uploaded in this turn; counts below are from the user's console output.
+
+| Measurement | Observed |
+|---|---:|
+| Total signal rows | **12,329** |
+| Direct `signal_write` rows | **12,226** |
+| Instruction-boundary `opcode_transition` rows | **102** |
+| Pointer `DS:[0x27177C]` | **0x00009B00** |
+| Resolved signal linear address | **0x00009B24** |
+| Producer writer | **CS 09B0, CS base 0x9B00, EIP 0x000008AF** |
+| Producer `0 -> nonzero` writes | **6,108** |
+| Consumer clear instruction | **0180:002054AD** |
+| Consumer `nonzero -> 0` writes | **6,108** |
+| Median spacing, direct positive writes | **16.652 ms** |
+| Range, positive spacing | **16.649–166.524 ms** |
+| Median spacing, consumer clears | **16.652 ms** |
+| Range, clear spacing | **8.951–177.633 ms** |
+
+The 102 `opcode_transition` events independently sampled the **same
+producer CS:EIP, 09B0:08AF**. They are **not additional producer
+writes**, and their roughly 999.127-ms median spacing is an artifact
+of sampling approximately every 60th IRQ0, NOT evidence of a 1-Hz
+game event.
+
+**High-confidence conclusion:** We have confirmed both the exact
+writer and the exact consumer of this watched DWORD:
+
+- Producer: `09B0:08AF` (linear executing code location
+  `0x9B00 + 0x8AF = 0xA3AF`), writing a positive/nonzero value
+  to the watched signal at linear `0x9B24`.
+- Consumer: `0180:002054AD`, clearing the same DWORD after exiting
+  the wait loop.
+- Both direct positive and clear events have the **16.652-ms
+  median spacing** already observed for the ~60.052-Hz PIT0 timer.
+
+The producer's `CS=09B0`, `CS.base=0x9B00` are compatible with
+**segmented interrupt-handler code**, possibly an IRQ0 timer handler.
+**However neither the current CPU operating mode nor the code
+segment's 16/32-bit operand size has been confirmed by the supplied
+stdout**, and an IVT pointer relationship has not yet been checked.
+The 6,108 activations/resets do not prove the game's combat simulation
+runs at 60 Hz. A timer/work signal is not necessarily a
+fighter-animation state update.
+
+### Local producer disassembly capture, added after this result
+
+The user-visible filenames and previously available 64-byte snapshots
+only captured protected-mode `0180` code; the producer lies in a
+different segment `09B0`. A new **default-off, private, one-time**
+snapshot is now committed to `src/hardware/mk2_signal_probe.h`:
+
+- On the **first directly observed 0-to-nonzero producer store**
+  with `DOSBOX_MK2_SIGNAL_WATCH=1`, copy **128 bytes at the producer
+  instruction `CS.base + EIP`**, another **128 bytes beginning
+  32 bytes earlier** for calling/branch context (may start mid-
+  instruction), and **128 bytes at `0180:002054FE`**, the
+  continuation target after the consumer's wait/clear loop.
+- Read the original guest **IRQ0 IVT offset/segment** from linear
+  `0x20/0x22` at the same instant and add those to each snapshot
+  CSV row. This allows later verification of a direct IRQ0 handler
+  association, rather than assuming one from CS and cadence alone.
+- Capture `protected_mode` and, critically, `code_bits` from
+  the current CPU code segment's default operand size, because
+  the real-mode-style producer may be **16-bit**, while the main MK2
+  consumer is 32-bit.
+- Write a separate **`*_signal_code.csv`**, preserving the first
+  seven columns of the previous `*_guest_code.csv` schema,
+  and flush once per emulated second. Only three tiny code slices
+  are collected; do not commit them, the CSV, or MK2 assets.
+- Update `scripts/extract_mk2_guest_code.py` to read optional
+  `code_bits`, print suitable `ndisasm -b 16` vs `-b 32`
+  (or GNU objdump) commands, and display IRQ0 vector values.
+  It remains compatible with the earlier 32-bit snapshots.
+
+**New code capture status: committed but NOT yet built or run in
+Windows.** Its initial result should be validated before assuming
+the snapshot origin is an instruction boundary or that the IVT
+vector points directly to the signal writer.
+
+### Next controlled test
+
+Rebuild latest `mk2-timing-research` and repeat the same
+`core=normal`, 40,000 cycles, `DOSBOX_MK2_TRACE` and
+`DOSBOX_MK2_SIGNAL_WATCH=1` run used successfully at 15:31.
+The existing PowerShell runner clears `DOSBOX_MK2_TRACE` when
+finished, so do not attempt to construct a filename from that
+environment variable after the run; select the actual output
+filename in `Documents/MK2Timing` instead.
+
+The new `*_signal_code.csv` can be processed using:
+
+```powershell
+# From the repository root; supply actual filename from the new run.
+python scripts/extract_mk2_guest_code.py "C:\Users\Usuario\Documents\MK2Timing\<NEW_RUN>_signal_code.csv"
+```
+
+Inspect the three 128-byte snippets and the captured
+`ivt_irq0_segment:ivt_irq0_offset` first. Only after confirming
+the producer is a timer/interrupt handler should we investigate
+which *downstream* code advances fighter physics, animation
+and input state. **Do not change PIT or VGA clocks to force
+a target FPS.**
+
 ## Context to restore in a new chat
 
-> Investigating **MK2 DOS** simulation vs VGA pacing, fork `WildGer/dosbox-staging` branch `mk2-timing-research`. Read `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. Earlier PIT0 ~60.052Hz / VGA ~70.09Hz, visual cadence 3-1-1-2, six image/scanout probes validated (70,000/70,000 VGA RGB lines agree with renderer cache). Dynamic/normal guest EIP research and six privately disassembled 64-byte code snippets established `0180:00205489` is a busy-wait reading DS:[ESI+0x24] with ESI from DS:[0x27177C], and `0x2054AD` clears the signal. `0x2196D5` reads VGA 0x3DA and conditionally updates DAC. Initial dedicated normal-core `_signal.csv` capture (user supplied analyzer stdout only) had **6,991 rows: 1 pointer resolve, 6,990 signal writes, all at `0180:002054AD` clearing nonzero->zero**, median interval **16.652 ms**, target linear address `0x9B24`, pointer value `0x9B00`. **ZERO positive writes were caught**, likely due to overly restrictive instrumentation, not evidence that the signal is never set. **LATEST UNTESTED PATCH** on branch: signal memory-write hooks no longer restrict to protected mode/normal decoder; a **bounded normal-core instruction-boundary comparison** samples up to 16,000 instructions following about every 60th IRQ0, enabled by `DOSBOX_MK2_SIGNAL_WATCH=1`, logs `opcode_transition` if value changes. `scripts/analyze_mk2_signal_trace.py` handles direct-store vs opcode events separately, avoiding double count. **NEXT:** build newest branch on Windows, capture normal-core MK2 at 40k cycles during seconds 30–150, upload new `_signal.csv` plus analyzer output to find producer PC. Do not identify a combat logic tick or change PIT/VGA timings until real state-update code has been verified. Do not commit MK2 executable/asset/code bytes to GitHub.
+> MK2 DOS timing research in GitHub fork `WildGer/dosbox-staging`, branch `mk2-timing-research`: read these findings, especially **Writer identified: MK2's work-ready flag is set at 09B0:08AF**, plus `docs/mk2-timing-research.md`. Earlier PIT0 ~60.052Hz, VGA ~70.09Hz, 3-1-1-2 visual pattern, 70,000/70,000 VGA RGB/cache line hash agreement. Private disassembly showed `0180:00205489` waits for DWORD DS:[ESI+0x24], ESI from DS:[0x27177C], and `0180:002054AD` clears this work-ready DWORD. **LATEST user-provided stdout** from `mk2_normal_40000_20261110_153111_signal.csv`: 12,329 rows, 6,108 direct `0 -> nonzero` stores by **CS 09B0, base 0x9B00, EIP 0x8AF**; 6,108 clears by `0180:002054AD`; median both 16.652ms ~60.05Hz; 102 independent bounded opcode samples also identify 09B0:08AF, not extra transitions. Watched linear target 0x9B24. Likely timer/interrupt-associated producer but still not confirmed as IRQ0 handler or 60Hz game-logic tick. New untested branch change: on first positive store, capture private **`*_signal_code.csv`** with 128-byte snippets at producer CS:EIP, 32 bytes before it, and MK2 consumer continuation 0180:2054FE; also record IVT IRQ0 vector, CPU mode and code segment 16/32 bit width. Updated `scripts/extract_mk2_guest_code.py` now chooses ndisasm -b16/-b32. Next: repeat runner after building latest branch, upload new `_signal_code.csv` or locally disassembled snippets/IRQ vector; establish producer ISR identity and actual downstream logic tick. Runner cleans `DOSBOX_MK2_TRACE` environment on exit; get output by actual path. Do NOT redistribute game code, alter PIT/VGA frequencies or assert simulator FPS without direct game-state evidence.
 
 **Raw CSVs are not in the repository.** Ask for the next `_signal.csv` if needed; don't infer unobserved rows.
