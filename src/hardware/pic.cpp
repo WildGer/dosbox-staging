@@ -12,6 +12,7 @@
 #include "hardware/port.h"
 #include "hardware/timer.h"
 #include "hardware/mk2_timing_probe.h"
+#include "hardware/mk2_vram_probe.h"
 
 // PIC Controllers
 // ~~~~~~~~~~~~~~~
@@ -380,7 +381,10 @@ static void secondary_startIRQ()
 
 static void inline primary_startIRQ(uint8_t i)
 {
-	if (i == 0) { Mk2TimingProbe::Get().OnIrq0Dispatch(); }
+	if (i == 0) {
+		Mk2TimingProbe::Get().OnIrq0Dispatch();
+		Mk2VramProbe::Get().OnIrq0(PIC_FullIndex());
+	}
 	primary_controller.start_irq(i);
 	CPU_HW_Interrupt(primary_controller.vector_base + i);
 }
@@ -612,6 +616,7 @@ void TIMER_AddTick(void) {
 	CPU_Cycles=0;
 	PIC_Ticks++;
 	Mk2TimingProbe::Get().OnClockTick(static_cast<double>(PIC_Ticks));
+	Mk2VramProbe::Get().OnClockTick(PIC_Ticks);
 	/* Go through the list of scheduled events and lower their index with 1000 */
 	PICEntry * entry=pic_queue.next_entry;
 	while (entry) {
