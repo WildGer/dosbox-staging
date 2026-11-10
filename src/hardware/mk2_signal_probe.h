@@ -24,6 +24,7 @@
 // memory-write helpers check it before calling this probe. No overhead from
 // hashing, file I/O or emulated-memory reads on the uninstrumented path.
 extern bool Mk2SignalWatchActive;
+extern bool Mk2SignalInstructionActive;
 
 class Mk2SignalProbe final {
 public:
@@ -74,6 +75,20 @@ public:
             const auto observed = mem_readd<MemOpMode::SkipBreakpoints>(
                     target_linear);
             Append("resolve", emulated_ms, 0, 0, observed, observed);
+            // Never compare instruction snapshots across a pointer change.
+            instruction_previous_valid = false;
+        }
+
+        // A short per-instruction data check on roughly every 60th IRQ0
+        // (about one diagnostic window per second) catches producers that
+        // bypass ordinary guest memory-store helpers. The normal core
+        // executes the next opcode *after* IRQ dispatch, so this includes
+        // the beginning of the IRQ handler without tracing the entire run.
+        if ((++irq0_observed % 60u) == 1u &&
+            !Mk2SignalInstructionActive) {
+            instruction_budget = 16000;
+            instruction_previous_valid = false;
+            Mk2SignalInstructionActive = true;
         }
     }
 
@@ -82,7 +97,13 @@ public:
     // watched target. Cross-page writes will be observed as byte writes.
     bool BeforeGuestStore(const PhysPt address, const uint8_t size)
     {
-        if (!resolved || !IsNormalCore() || !cpu.pmode || size == 0) {
+        // The IRQ0 signal producer may run in real mode, under a
+        // different decoder, or inside a DOS extender callback. The old
+        // protected-mode/normal-decoder restriction missed every observed
+        // positive transition. Resolve the target under the known consumer
+        // first, then watch stores to that *linear address* regardless of
+        // the current CPU mode. CS:EIP attribution still needs validation.
+        if (!resolved || size == 0) {
             return false;
         }
         // Extremely cheap address comparison first; do not calculate
@@ -158,9 +179,57 @@ public:
             if (after && next_target <= std::numeric_limits<PhysPt>::max()) {
                 pointer_value = after;
                 target_linear = static_cast<PhysPt>(next_target);
+                instruction_previous_valid = false;
             } else {
                 resolved = false;
+                Mk2SignalInstructionActive = false;
+                instruction_budget = 0;
             }
+        }
+    }
+
+    // Called at the start of an interpreted instruction. Compare the
+    // watched DWORD to the value seen at the previous instruction
+    // boundary, attributing a transition to the preceding guest EIP.
+    // This will also catch writes through direct host-backed memory,
+    // although a callback outside guest execution can change the DWORD.
+    void OnInstructionBoundary()
+    {
+        if (!resolved || instruction_budget == 0) {
+            Mk2SignalInstructionActive = false;
+            return;
+        }
+        --instruction_budget;
+        const auto value =
+                mem_readd<MemOpMode::SkipBreakpoints>(target_linear);
+        if (instruction_previous_valid && value != instruction_last_value) {
+            Append("opcode_transition",
+                   PIC_FullIndex(),
+                   target_linear,
+                   4,
+                   instruction_last_value,
+                   value,
+                   instruction_last_cs,
+                   instruction_last_cs_base,
+                   instruction_last_eip,
+                   instruction_last_ds,
+                   instruction_last_ds_base);
+            // We only need one positive producer instruction per short
+            // window; disarm immediately after observing it.
+            if (instruction_last_value == 0 && value != 0) {
+                instruction_budget = 0;
+            }
+        }
+        instruction_last_value = value;
+        instruction_last_cs = SegValue(cs);
+        instruction_last_cs_base = SegPhys(cs);
+        instruction_last_eip = reg_eip;
+        instruction_last_ds = SegValue(ds);
+        instruction_last_ds_base = SegPhys(ds);
+        instruction_previous_valid = true;
+
+        if (instruction_budget == 0) {
+            Mk2SignalInstructionActive = false;
         }
     }
 
@@ -245,6 +314,7 @@ private:
 
     ~Mk2SignalProbe()
     {
+        Mk2SignalInstructionActive = false;
         Mk2SignalWatchActive = false;
         Flush();
     }
@@ -329,6 +399,15 @@ private:
 
     bool enabled = false;
     bool resolved = false;
+    uint32_t irq0_observed = 0;
+    uint32_t instruction_budget = 0;
+    bool instruction_previous_valid = false;
+    uint32_t instruction_last_value = 0;
+    uint16_t instruction_last_cs = 0;
+    uint16_t instruction_last_ds = 0;
+    uint32_t instruction_last_cs_base = 0;
+    uint32_t instruction_last_eip = 0;
+    uint32_t instruction_last_ds_base = 0;
     uint16_t ds_selector = 0;
     uint32_t data_segment_base = 0;
     uint32_t pointer_location = 0;
