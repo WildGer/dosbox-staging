@@ -10,6 +10,7 @@
 
 #include "gui/render/render.h"
 #include "hardware/memory.h"
+#include "hardware/mk2_vga_regs_probe.h"
 #include "hardware/port.h"
 #include "hardware/video/reelmagic/reelmagic.h"
 #include "ints/int10.h"
@@ -180,6 +181,7 @@ static void write_p3c6(io_port_t, io_val_t value, io_width_t)
 		LOG_MSG("VGA:DCA: PEL mask set to %Xh", val);
 #endif
 		vga.dac.pel_mask = val;
+		Mk2VgaRegsProbe::Get().OnDacMaskWrite(val);
 
 		for (auto i = 0; i < NumVgaColors; ++i) {
 			const auto palette_idx = check_cast<uint8_t>(i);
@@ -281,6 +283,11 @@ static void write_p3c9(io_port_t, io_val_t value, io_width_t)
 			}
 		}
 
+		// A complete three-component DAC entry was just programmed.
+		// Record the index before the VGA auto-increment occurs.
+		const auto& rgb = vga.dac.rgb[vga.dac.write_index];
+		Mk2VgaRegsProbe::Get().OnDacRgbCommit(
+		        vga.dac.write_index, rgb.red, rgb.green, rgb.blue);
 		++vga.dac.write_index;
 		// vga.dac.read_index = vga.dac.write_index - ;
 		// disabled as it breaks Wari
