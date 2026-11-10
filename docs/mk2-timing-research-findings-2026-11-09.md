@@ -851,7 +851,7 @@ left a trailing `.` in this PowerShell environment, yielding a wrong
 ```powershell
 $codeCsv = $env:DOSBOX_MK2_TRACE -replace '\\.csv
 
-> Continue MK2 DOS timing investigation in repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, using this findings report and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz, recurring source-frame visual cadence 3-1-1-2. Six visual/VGA probes were validated and found 70,000 matching VGA-to-source-cache line hashes, and frames that can change because writes during scanout N are first read in N+1. Seventh guest-context probe captured `mk2_40000_20261110_133415_guest.csv` (dynamic/auto), and `mk2_normal_40000_20261110_134308_guest.csv` (normal). In normal, 6,963/7,076 pre-IRQ0 samples are in page `00205400`, distributed almost equally among exact `CS:EIP=0180:00205489/8F/92/94` (possible tight loop). All 1,531 3DAh sync rising and 5,402 sampled port reads show `0180:002196D5` (candidate polling instruction). VRAM first-write samples are concentrated in code pages `00204200–002049FF`. None of these has been demonstrated to be an MK2 simulation tick. **NEW untested branch change:** a small, one-time, 64-byte guest code snapshot probe for six known locations, saved LOCALLY to `*_guest_code.csv` when the ordinary `DOSBOX_MK2_TRACE` is enabled. Helper `scripts/extract_mk2_guest_code.py` writes local .bin snippets and prints ndisasm/objdump commands. Next: compile, run a short core=normal combat trace, inspect snapshot CSV, privately disassemble candidate code, verify actual loop/state changes before counting ticks. Do not put guest MK2 code bytes or assets in the repository or modify PIT/VGA/guest binary timing.
+> MK2 DOS frame-timing research: GitHub repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. Start with this findings document and `docs/mk2-timing-research.md`. Earlier phases measured PIT 60.052 Hz, VGA 70.09 Hz, scanouts, VRAM writes, palette cycling; 70,000/70,000 line hashes matched VGA and renderer cache, and 837 changed source frames without new writes were compatible with prior-scanout progressive VRAM sampling. Seventh phase guest `_guest.csv` samples were compared using dynamic and normal CPU cores. In normal the dominant 4 EIPs near 0x205489 were 0x205489, 0x20548F, 0x205492 and 0x205494; all VGA 0x3DA polls at 0x2196D5. **Six 64-byte guest memory snippets have now been privately supplied and actually disassembled.** At `0180:00205489` the game loads ESI from `[0x27177C]`, busy-waits on `[ESI+0x24] != 0`, saves the nonzero value to `0x275B0C`, updates `0x275B10`, resets `[ESI+0x24]` to 0 and branches to `0x2054FE` (outside snippet). The **writer/producer of this work-ready value is unknown**; we must identify it before claiming a game simulation tick. At `0180:002196D5` actual `in al,dx`, `test al,8`, backwards jump waits for VGA VSYNC, then conditionally programs palette DAC index 0 through `0x3C8/0x3C9`. Snippets `0x2042FC`, `0x20461A`, `0x20479A` are large unrolled conditional memory compare/copy patterns. The `0x20C81E` sample is byte arithmetic/table lookups, not a proven timer. Next: targeted normal-core watchpoint for guest linear address `uint32[0x27177C] + 0x24`, record writer CS:EIP and time; inspect code around writer and 0x2054FE; only then count confirmed game-state updates. No copyrighted game bytes in GitHub. Do not change PIT, VGA clocks, MK2 EXE, or gameplay timing.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
 , '_guest_code.csv'
@@ -861,6 +861,162 @@ python scripts/extract_mk2_guest_code.py "$codeCsv"
 
 The main instrumentation guide now uses `Split-Path -LeafBase`
 to avoid this trailing-dot issue.
+
+## Six guest code snippets: confirmed x86 instruction analysis (2026-11-10)
+
+**Source:** The user supplied the **six 64-byte, protected-mode memory
+snippets** extracted from their own MK2 installation after a
+`core=normal` run. Each snippet was decoded as 32-bit x86 with
+`objdump -D -b binary -m i386 -M intel` using its actual guest EIP
+as the origin. These exact bytes are user-private and are **not
+copied or distributed in this repository**. The observations below are
+from the actual machine instructions, not address-frequency guesses.
+
+### A. `0180:00205489`: wait for a nonzero work/clock value
+
+The first four instructions read a pointer from guest linear address
+`0x27177C`, load a 32-bit value at `[ESI+0x24]`, test for zero and
+branch **back to `0x205489` while zero**:
+
+```text
+ESI = uint32[0x27177C]
+value = uint32[ESI + 0x24]
+if (value == 0) goto 0x205489
+```
+
+On nonzero, it performs these observable actions:
+
+```text
+uint32[0x275B0C] = value
+uint32[0x275B10] =
+    (uint32[0x275B10] + (value << 1)) >> 1
+uint32[ESI + 0x24] = 0
+ESI = 0x275B04
+goto 0x2054FE
+```
+
+The code starts at `0x205489`, the nonzero path at
+`0x205496`, the reset instruction at `0x2054AD`, and
+the final forward branch at `0x2054B9`. The latter targets
+`0x2054FE`, **outside the 64-byte snapshot**, so the downstream
+logic is unknown.
+
+**Directly demonstrated:** This is a **busy-wait / consume-and-clear**
+mechanism for a 32-bit memory value, likely representing pending work
+or timing signals. Because it can read any nonzero value, it cannot be
+assumed to be strictly boolean or a one-per-frame flag.
+
+**Not demonstrated:** What writes `[uint32[0x27177C]+0x24]`;
+whether the writer is IRQ0, another interrupt, sound, a helper loop,
+or combat-logic code; whether one nonzero read advances one fighter
+simulation tick; or what subsequent code does after `0x2054FE`.
+
+**Best next step:** identify the producer/writer of this exact
+**dynamic linear guest address** and record its transitions/timestamps
+independently of the consumer. Do not increment a gameplay-tick
+counter merely whenever this busy-wait loop exits.
+
+### B. `0180:002196D5`: VGA vertical-retrace wait AND DAC update
+
+The first instructions perform an `IN AL,DX`, test bit `0x08`,
+and branch back to `0x2196D5` if the bit is clear. The caller's
+DX was proven by the hook to be the VGA status port `0x3DA`.
+Thus this **waits for vertical retrace**.
+
+On success it tests bit `0x8000` of the 32-bit word at
+`0x2B5CE8`, skips via a conditional branch to `0x21971F`
+if set, and otherwise:
+
+- Writes DAC palette-index **0** to I/O port **`0x3C8`**;
+- Changes DX to **`0x3C9`**;
+- Writes three DAC components computed from the word at
+  `0x2B5CE8`: `(value >> 9) & 0x3F | 1`,
+  `(value >> 4) & 0x3F | 1`, and
+  `(value << 1) & 0x3F | 1`.
+
+The sample contains all three `OUT DX,AL` instructions, ending
+with the third at `0x219714`. Precise loop *calling frequency*
+cannot be inferred from the 99.876-ms **median** between sampled
+VSYNC-rising events: the game samples selected retraces and not
+necessarily every physical/emulated VGA interval.
+
+**Directly demonstrated:** This site is a guest **vertical-sync
+polling loop followed by palette DAC entry-zero programming** under
+a conditional test, not simply a hypothetical wait site.
+
+**Not demonstrated:** That this routine is the simulation's master
+clock or that every call updates gameplay state. Its immediate
+effect is conditional palette I/O.
+
+### C. Three VGA-write-site snippets: unrolled conditional memory loops
+
+At `0x2042FC`, `0x20461A`, and `0x20479A`, repeated
+patterns are directly visible:
+
+```text
+EAX = uint32[ESI + offset]
+compare uint32[EDI + offset] to EAX
+if equal: branch to earlier code elsewhere in the routine
+uint32[EBP + offset] = EAX
+repeat for the next 4-byte aligned offset
+```
+
+Examples of those earlier branch targets include `0x203E18`,
+`0x20408E`, and `0x2041AE`; all **outside the respective
+64-byte slices**. These are very likely parts of a large, unrolled
+conditional buffer-processing or block-copy/difference routine,
+which is consistent with the previously sampled VGA-write PCs.
+
+**Not demonstrated:** That ESI is the original game's sprite buffer,
+EDI is a framebuffer, or EBP is VGA memory. The addresses and pointer
+initialisation outside these snippets are required before assigning
+specific roles. The fragment ends may bisect instructions; do not
+trust partial terminal disassembly.
+
+### D. `0x20C81E`: byte arithmetic, nested loop and lookup-table access
+
+This fragment is not an independent function entry. It begins with
+byte arithmetic and branches backward to **`0x20C808`**
+(outside the snippet), modifies EDI, ESI and EBP, and includes
+`RET` instructions at `0x20C82D` and `0x20C844`.
+A later sequence beginning at `0x20C848` masks a byte of EAX and
+indexes a dword table at **`0x241084`**.
+
+**Directly demonstrated:** a loop with arithmetic over byte-sized
+values, early/loop-back branches, and a table lookup; most likely a
+generic processing helper. There is **no evidence in this snippet**
+of a periodic timer or a game-state update, despite the word
+`periodic` in the sampling label.
+
+### Updated research direction
+
+We now have **instruction-level evidence** separating the wait-for-
+nonzero loop, VGA-synchronized DAC writes, unrolled buffer processing,
+and an unidentified table/byte routine. The strongest lead toward
+measuring true simulation cadence is the **producer** of
+`[uint32[0x27177C] + 0x24]`; the currently observed consumer is not
+automatically the game tick.
+
+Next controlled test should:
+
+1. Read and record the **runtime pointer value**
+   `uint32[0x27177C]`, and the resulting watched linear address
+   `pointer + 0x24`. It could vary between game states.
+2. Capture **actual writes** to that address, including the writer
+   `CS:EIP`, value before/after and PIC emulated timestamp, using a
+   carefully scoped **normal-core** watchpoint or equivalent debugger
+   instrumentation. Avoid an instruction hook in the default dynamic
+   core for normal gameplay.
+3. Correlate writes with IRQ0 events, VSYNC/DAC updates and the
+   busy-wait read/reset. Separate a producer's work-ready signal
+   from an actual confirmed combat-simulation update.
+4. Obtain small private code contexts around the writer and around
+   the target of `0x2054B9 -> 0x2054FE`, rather than dumping the game.
+5. Only after disassembling and confirming a routine that advances
+   **game state** should a precise logic-tick counter be built.
+
+**No PIT/VGA frequency, guest binaries or simulation timing were
+changed by this analysis.**
 
 ## Context to restore in a new chat
 
