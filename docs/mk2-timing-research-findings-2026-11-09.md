@@ -849,7 +849,7 @@ left a trailing `.` in this PowerShell environment, yielding a wrong
 `._guest_code.csv` path. The working expression is:
 
 ```powershell
-$codeCsv = $env:DOSBOX_MK2_TRACE -replace '\\.csv
+$codeCsv = $env:DOSBOX_MK2_TRACE.Substring(0, $env:DOSBOX_MK2_TRACE.Length - 4) + "_guest_code.csv"
 
 > MK2 DOS frame-timing research: GitHub repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. Start with this findings document and `docs/mk2-timing-research.md`. Earlier phases measured PIT 60.052 Hz, VGA 70.09 Hz, scanouts, VRAM writes, palette cycling; 70,000/70,000 line hashes matched VGA and renderer cache, and 837 changed source frames without new writes were compatible with prior-scanout progressive VRAM sampling. Seventh phase guest `_guest.csv` samples were compared using dynamic and normal CPU cores. In normal the dominant 4 EIPs near 0x205489 were 0x205489, 0x20548F, 0x205492 and 0x205494; all VGA 0x3DA polls at 0x2196D5. **Six 64-byte guest memory snippets have now been privately supplied and actually disassembled.** At `0180:00205489` the game loads ESI from `[0x27177C]`, busy-waits on `[ESI+0x24] != 0`, saves the nonzero value to `0x275B0C`, updates `0x275B10`, resets `[ESI+0x24]` to 0 and branches to `0x2054FE` (outside snippet). The **writer/producer of this work-ready value is unknown**; we must identify it before claiming a game simulation tick. At `0180:002196D5` actual `in al,dx`, `test al,8`, backwards jump waits for VGA VSYNC, then conditionally programs palette DAC index 0 through `0x3C8/0x3C9`. Snippets `0x2042FC`, `0x20461A`, `0x20479A` are large unrolled conditional memory compare/copy patterns. The `0x20C81E` sample is byte arithmetic/table lookups, not a proven timer. Next: targeted normal-core watchpoint for guest linear address `uint32[0x27177C] + 0x24`, record writer CS:EIP and time; inspect code around writer and 0x2054FE; only then count confirmed game-state updates. No copyrighted game bytes in GitHub. Do not change PIT, VGA clocks, MK2 EXE, or gameplay timing.
 
@@ -1090,7 +1090,7 @@ $env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$
 
 & "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
 
-$signalCsv = $env:DOSBOX_MK2_TRACE -replace '\.csv
+$signalCsv = $env:DOSBOX_MK2_TRACE.Substring(0, $env:DOSBOX_MK2_TRACE.Length - 4) + "_signal.csv"
 Test-Path "$signalCsv"
 python scripts/analyze_mk2_signal_trace.py "$signalCsv"
 Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
