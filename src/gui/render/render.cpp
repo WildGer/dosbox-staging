@@ -27,6 +27,7 @@
 #include "hardware/mk2_vram_probe.h"
 #include "hardware/mk2_vga_regs_probe.h"
 #include "hardware/mk2_scanmem_probe.h"
+#include "hardware/mk2_scanline_probe.h"
 #include "hardware/video/vga.h"
 #include "misc/notifications.h"
 #include "misc/support.h"
@@ -442,11 +443,20 @@ void RENDER_EndUpdate(const bool abort)
 			        source.src.width,
 			        source.src.height,
 			        static_cast<int>(source.src.pixel_format));
+			Mk2ScanlineProbe::Get().OnComplete(
+			        frame_probe.LastFrameIndex(),
+			        scanout_timestamp,
+			        reinterpret_cast<const uint8_t*>(source.cache.data()),
+			        source.src.width,
+			        source.src.height,
+			        source.pitch);
 		} else {
 			Mk2ScanmemProbe::Get().OnAbort();
+			Mk2ScanlineProbe::Get().OnAbort();
 		}
 	} else {
 		Mk2ScanmemProbe::Get().OnAbort();
+		Mk2ScanlineProbe::Get().OnAbort();
 	}
 
 	// Two gates on captures:
