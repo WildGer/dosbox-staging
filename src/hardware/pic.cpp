@@ -25,6 +25,11 @@ void Mk2SignalOnInstructionBoundary()
 	Mk2SignalProbe::Get().OnInstructionBoundary();
 }
 
+void Mk2SignalOnTaskDispatch()
+{
+	Mk2SignalProbe::Get().OnTaskDispatch();
+}
+
 bool Mk2SignalBeforeWrite(const PhysPt addr, const uint8_t size)
 {
 	return Mk2SignalProbe::Get().BeforeGuestStore(addr, size);
