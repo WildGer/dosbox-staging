@@ -286,6 +286,7 @@ public:
         row.object_a = ReadObjectFields(row.ds_base, 0x002b5fc2u);
         row.object_b = ReadObjectFields(row.ds_base, 0x002b6146u);
         CaptureDispatchCallbackCode(row.handler_eip, row.emulated_ms);
+        CaptureHelperCandidateCode(row.handler_eip, row.emulated_ms);
     }
 
     void OnClockTick(const uint32_t ms)
@@ -309,6 +310,7 @@ private:
     static constexpr std::size_t DispatchBufferSize = 4096;
     static constexpr std::size_t DispatchCodeBytes = 256;
     static constexpr std::size_t DispatchCodeSites = 14;
+    static constexpr std::size_t HelperCodeSites = 8;
 
     struct DispatchCodeSnapshot {
         bool captured = false;
@@ -580,6 +582,38 @@ private:
         }
     }
 
+    // Helper addresses are referenced by actual decoded MK2 callbacks.
+    // Capturing their code does NOT prove they execute in the sampled
+    // dispatcher pass; they are further disassembly candidates.
+    void CaptureHelperCandidateCode(const uint32_t handler_eip,
+                                    const double emulated_ms)
+    {
+        if (!dispatch_code_output.is_open() ||
+            (handler_eip != 0x002133b5u &&
+             handler_eip != 0x0022047du &&
+             handler_eip != 0x002239b2u)) {
+            return;
+        }
+        static constexpr std::array<uint32_t, HelperCodeSites> targets = {
+                0x0021374au, 0x002136f6u, 0x00202706u, 0x00201739u,
+                0x00203285u, 0x00231ec8u, 0x002054bbu, 0x00205673u};
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            auto& sample = helper_code[i];
+            if (sample.captured) {
+                continue;
+            }
+            const uint32_t eip = targets[i];
+            sample.eip = eip;
+            sample.emulated_ms = emulated_ms;
+            for (std::size_t j = 0; j < DispatchCodeBytes; ++j) {
+                sample.bytes[j] =
+                        mem_readb<MemOpMode::SkipBreakpoints>(
+                                static_cast<PhysPt>(eip + j));
+            }
+            sample.captured = true;
+        }
+    }
+
     void FlushDispatchCode()
     {
         if (!dispatch_code_output.is_open()) {
@@ -590,6 +624,28 @@ private:
                 continue;
             }
             dispatch_code_output << "callback_" << std::hex
+                                 << std::uppercase << std::setfill('0')
+                                 << std::setw(8) << sample.eip
+                                 << std::dec << std::nouppercase
+                                 << std::setfill(' ') << ','
+                                 << std::fixed << std::setprecision(6)
+                                 << sample.emulated_ms
+                                 << ",384,0," << sample.eip << ','
+                                 << sample.eip << ','
+                                 << std::hex << std::setfill('0');
+            for (const auto byte : sample.bytes) {
+                dispatch_code_output << std::setw(2)
+                                     << static_cast<unsigned>(byte);
+            }
+            dispatch_code_output << std::dec << std::setfill(' ')
+                                 << ",32\n";
+            sample.written = true;
+        }
+        for (auto& sample : helper_code) {
+            if (!sample.captured || sample.written) {
+                continue;
+            }
+            dispatch_code_output << "helper_candidate_" << std::hex
                                  << std::uppercase << std::setfill('0')
                                  << std::setw(8) << sample.eip
                                  << std::dec << std::nouppercase
@@ -820,6 +876,7 @@ private:
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
     std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
     std::array<DispatchCodeSnapshot, DispatchCodeSites> dispatch_code = {};
+    std::array<DispatchCodeSnapshot, HelperCodeSites> helper_code = {};
     std::size_t dispatch_count = 0;
     uint64_t dispatch_written = 0;
     uint64_t dispatch_dropped = 0;
