@@ -239,11 +239,52 @@ public:
         }
     }
 
+    // Exact normal-core instruction boundary, validated by disassembly:
+    // 0180:00205531 is JMP DWORD PTR DS:[ESI+0x1C].
+    // The EIP is sampled BEFORE the jump executes, while ESI points
+    // to the task node and its destination has not yet been loaded.
+    void OnTaskDispatch()
+    {
+        if (!enabled || !IsNormalCore() || !cpu.pmode ||
+            SegValue(cs) != 0x0180u || SegPhys(cs) != 0 ||
+            reg_eip != 0x00205531u ||
+            !InWindow(PIC_FullIndex())) {
+            return;
+        }
+        const uint64_t node = static_cast<uint64_t>(SegPhys(ds)) +
+                              static_cast<uint64_t>(reg_esi);
+        if (node > static_cast<uint64_t>(
+                           std::numeric_limits<PhysPt>::max()) - 0x20u) {
+            return;
+        }
+        if (dispatch_count == DispatchBufferSize) {
+            ++dispatch_dropped;
+            return;
+        }
+        auto& row = dispatch_buffer[dispatch_count++];
+        row.emulated_ms = PIC_FullIndex();
+        row.task_offset = reg_esi;
+        row.task_linear = static_cast<uint32_t>(node);
+        row.ds = SegValue(ds);
+        row.ds_base = SegPhys(ds);
+        row.remaining = static_cast<int16_t>(
+                mem_readw<MemOpMode::SkipBreakpoints>(
+                        static_cast<PhysPt>(node + 0x06u)));
+        row.next_offset = mem_readd<MemOpMode::SkipBreakpoints>(
+                static_cast<PhysPt>(node));
+        row.handler_eip = mem_readd<MemOpMode::SkipBreakpoints>(
+                static_cast<PhysPt>(node + 0x1cu));
+        row.ebp = reg_ebp;
+        row.edi = reg_edi;
+        row.cs = SegValue(cs);
+    }
+
     void OnClockTick(const uint32_t ms)
     {
         if (enabled && ms % 1000u == 0) {
             Flush();
             FlushCode();
+            FlushDispatch();
         }
     }
 
@@ -255,6 +296,21 @@ private:
     static constexpr std::size_t BufferCount = 512;
     static constexpr std::size_t CodeBytes = 128;
     static constexpr std::size_t CodeSiteCount = 3;
+    static constexpr std::size_t DispatchBufferSize = 4096;
+
+    struct DispatchRow {
+        double emulated_ms = 0;
+        uint32_t task_offset = 0;
+        uint32_t task_linear = 0;
+        uint32_t next_offset = 0;
+        uint32_t handler_eip = 0;
+        uint32_t ebp = 0;
+        uint32_t edi = 0;
+        uint32_t ds_base = 0;
+        int16_t remaining = 0;
+        uint16_t ds = 0;
+        uint16_t cs = 0;
+    };
 
     struct CodeSnapshot {
         const char* site = "";
@@ -345,6 +401,19 @@ private:
                            "code_bits,ivt_irq0_segment,ivt_irq0_offset\n";
         }
 
+        const auto dispatch_path = trace.substr(0, cut) + "_dispatch" +
+                                   (cut < trace.size()
+                                            ? trace.substr(cut)
+                                            : ".csv");
+        dispatch_output.open(dispatch_path,
+                             std::ios::out | std::ios::trunc);
+        if (dispatch_output.is_open()) {
+            dispatch_output << "event_index,emulated_ms,event,cs,ds,"
+                               "ds_base,task_offset,task_linear,"
+                               "next_offset,remaining,handler_eip,"
+                               "ebp,edi,dropped_count\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -355,6 +424,7 @@ private:
         Mk2SignalWatchActive = false;
         Flush();
         FlushCode();
+        FlushDispatch();
     }
 
     // The source at 09B0:08AF has now been observed through both
@@ -421,6 +491,37 @@ private:
         CaptureSite(2, "consumer_after_wait_2054FE",
                     producer, 0x0180u, 0u,
                     0x002054feu, 0x002054feu);
+    }
+
+    void FlushDispatch()
+    {
+        if (!dispatch_output.is_open()) {
+            return;
+        }
+        for (std::size_t i = 0; i < dispatch_count; ++i) {
+            const auto& row = dispatch_buffer[i];
+            dispatch_output << ++dispatch_written << ','
+                            << std::fixed << std::setprecision(6)
+                            << row.emulated_ms << ",dispatch,"
+                            << row.cs << ',' << row.ds << ','
+                            << row.ds_base << ',' << row.task_offset
+                            << ',' << row.task_linear << ','
+                            << row.next_offset << ','
+                            << row.remaining << ','
+                            << row.handler_eip << ','
+                            << row.ebp << ',' << row.edi
+                            << ",0\n";
+        }
+        if (dispatch_dropped) {
+            dispatch_output << ++dispatch_written << ','
+                            << std::fixed << std::setprecision(6)
+                            << PIC_FullIndex() << ",overflow,"
+                            << "0,0,0,0,0,0,0,0,0,0,"
+                            << dispatch_dropped << '\n';
+            dispatch_dropped = 0;
+        }
+        dispatch_count = 0;
+        dispatch_output.flush();
     }
 
     void FlushCode()
@@ -553,8 +654,13 @@ private:
     Pending pending = {};
     std::ofstream output = {};
     std::ofstream code_output = {};
+    std::ofstream dispatch_output = {};
     std::array<Entry, BufferCount> buffer = {};
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
+    std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
+    std::size_t dispatch_count = 0;
+    uint64_t dispatch_written = 0;
+    uint64_t dispatch_dropped = 0;
 };
 
 #endif // DOSBOX_MK2_SIGNAL_PROBE_H
