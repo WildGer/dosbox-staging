@@ -859,8 +859,8 @@ Test-Path "$codeCsv"
 python scripts/extract_mk2_guest_code.py "$codeCsv"
 ```
 
-The main instrumentation guide now uses `Split-Path -LeafBase`
-to avoid this trailing-dot issue.
+The main instrumentation guide now uses PowerShell 5.1-compatible
+`-replace` to avoid the trailing-dot issue and unsupported `-LeafBase` option.
 
 ## Six guest code snippets: confirmed x86 instruction analysis (2026-11-10)
 
@@ -1090,7 +1090,24 @@ $env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$
 
 & "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
 
-$signalCsv = Join-Path (Split-Path $env:DOSBOX_MK2_TRACE -Parent) ((Split-Path $env:DOSBOX_MK2_TRACE -LeafBase) + "_signal.csv")
+$signalCsv = $env:DOSBOX_MK2_TRACE -replace '\.csv
+Test-Path "$signalCsv"
+python scripts/analyze_mk2_signal_trace.py "$signalCsv"
+Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
+```
+
+Collect gameplay in the 30–150s emulated window, and upload
+`*_signal.csv` plus analyzer stdout. The existing `_guest.csv`
+may also help if unusual PC contexts are observed. Do not label a
+writer as the MK2 simulation tick until its code and the related
+actual game-state changes have been verified.
+
+## Context to restore in a new chat
+
+> Current MK2 DOS timing research in `WildGer/dosbox-staging`, branch `mk2-timing-research`: review `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz, VGA ~70.09 Hz; six video telemetry streams validated, 70,000 VGA/cache line hashes match, most previously unexplained source images reflect VRAM writes during earlier scanouts. The seventh guest CPU trace in dynamic and normal cores found 0180:00205489/8F/92/94 as a tight wait and 0180:002196D5 as VGA 3DAh wait. Actual private disassembly of six code snippets confirmed 0x205489 loads a pointer from `DS:[0x27177C]`, spins while `DWORD DS:[ESI+0x24]==0`, and then saves/clears the value; the producer is UNKNOWN. CS base was zero in samples; DS base has NOT been measured and must be resolved dynamically. Latest change (NOT YET BUILT ON WINDOWS): opt-in normal-core writer watch in `src/hardware/mk2_signal_probe.h`, enabled with BOTH `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`, hooks standard normal-core guest stores through `src/cpu/paging.h`, resolves DS pointer on pre-IRQ0 in the wait-loop, logs producer CS:EIP, old/new value and PIC time to `_signal.csv` during emulated 30–150s. Analyzer `scripts/analyze_mk2_signal_trace.py`. Next: compile, run 60+ emulated seconds of active combat with `core=normal`, upload `_signal.csv` plus analyzer output; identify the producer and disassemble it before asserting any real MK2 simulation tick. No MK2 assets/code bytes in GitHub. Do not modify PIT/VGA or game's executable.
+
+**Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
+, '_signal.csv'
 Test-Path "$signalCsv"
 python scripts/analyze_mk2_signal_trace.py "$signalCsv"
 Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
