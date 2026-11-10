@@ -217,7 +217,7 @@ These categories are **mutually exclusive**, processed in this order:
 
 The effective-palette change is much more frequent **between** scanouts
 than **during** them: among 320×200 frames, 1,744 had
-`palette_changed_between=1`, while only 2 had
+`palette_changed_between=1`, while only **1** had
 `palette_changed_during=1`. Some of these did not produce different
 visible images (for example, changes to unused palette entries).
 
@@ -242,6 +242,10 @@ A boundary-sensitive join that counts write buckets with
 | Yes | No | **1,332** | 1,273 | **59** |
 | Yes | Yes | **555** | 555 | 0 |
 | **Total** | | **3,642** | **2,887** | **755** |
+
+The 696 cases belong to **this 2026-11-10 capture**, and should not
+be equated with the approximately 748/749 no-event cases in the **different
+2026-11-09 capture**. These are separate gameplay sessions.
 
 The **696** images with neither intercepted write operations nor DAC RGB
 commits in the preceding scanout interval also had **no net change** in
