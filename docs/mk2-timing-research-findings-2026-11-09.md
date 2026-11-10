@@ -5,7 +5,7 @@
 **Working platform:** Windows 11, Visual Studio 2026 (CMake `release-windows` preset), ClangCL, vcpkg at `C:\vcpkg`
 **Research date:** 2026-11-09
 **Game:** GOG installation of *Mortal Kombat II*, launched as an external DOS .EXE.
-**Status:** Instrumentation through register and video-write tracing was successfully used to generate CSV captures. New **boundary memory-state** (`_scanmem.csv`) probe added to the branch after the latest CSVs; **requires Windows build/runtime validation**.
+**Status:** All five CSV instrumentation streams now run on Windows, including the new boundary memory-state (`_scanmem.csv`) trace. The 2026-11-10 five-CSV capture has been analyzed below. Next open question: 696 changed source images with no preceding observed VRAM write/DAC commit and no sampled backing-memory or palette boundary change.
 
 ## Scope and non-negotiable constraints
 
@@ -69,6 +69,7 @@ The project conversation had the following user-supplied CSV captures; do not im
 | 40,000 | `mk2_40000_20261109_204156` | PIT/VGA, frames + 8×5 region grid |
 | 40,000 | `mk2_40000_20261109_214037` | PIT/VGA, frames + regions, VRAM write counters |
 | 40,000 | `mk2_40000_20261109_220957` | PIT/VGA, frames + regions, VRAM, VGA register timeline |
+| 40,000 | `mk2_40000_20261110_124505` | **All five streams**, including scanmem boundary hashes; findings verified in this document |
 
 A future researcher should ask for these files again if necessary. All files are private experimental data; *do not claim to possess them in Git*. Each prefix denotes its own session, often with different fight/menu durations, so do not align different sessions by absolute emulated time.
 
@@ -161,8 +162,155 @@ and `visible_image_hash`.
 7. If no clear cause emerges, consider **per-scanline** timestamped state sampling in a narrowly scoped subset of frames rather than globally increasing logging volume.
 8. Only after attributing changes should the experiment evaluate possible timing modifications. Preserve gameplay logic, input responsiveness and original animation pacing.
 
+## Follow-up capture 2026-11-10 — five-stream scanout boundary verification
+
+**Status: the new `_scanmem.csv` instrumentation builds and runs on the
+user's Windows computer.** The user supplied all five generated CSV files,
+with prefix `mk2_40000_20261110_124505`. The files are **not in GitHub**;
+the following calculations were made from those uploaded CSVs. Keep the
+original CSVs if later independent replication is desired.
+
+### Integrity and sampling coverage
+
+- Full trace: approximately **149.9 s emulated**; 10,505 completed
+  `_frames.csv` scanouts, 3,678 changed source images.
+- Of these, VGA graphics mode **320×200**, `pixel_format=32`, accounts
+  for **9,975 scanouts and 3,642 changed source images**.
+- The other 530 scanouts were 720×400 text mode with 36 changed images.
+- All **10,505** `_scanmem.csv` rows align 1:1 with `_frames.csv`:
+  scanout indices, completion timestamps (`end_ms=emulated_ms`),
+  `visible_changed=changed`, and `visible_image_hash=visible_hash`
+  all match exactly. This is a positive integration check, **not** proof
+  of a fully accurate scanout model.
+- In all sampled 320×200 frames, `begin_vga_mode=8` (`M_VGA`);
+  `begin_source_kind=2` (**`vga.fastmem`**). Both the raw backing store
+  and fastmem were valid. The probe hashed **262,144 raw bytes** and
+  **131,072 fastmem bytes** at each boundary. Full relevant mode
+  coverage is plausible, but the actual active memory addressing must
+  still be checked before claiming it is complete.
+- Across those graphics-mode samples, the raw and fastmem **change flags**
+  agree for each 'during' and 'between' category. Their hash values are
+  different because they represent different layouts.
+- `_vram.csv` includes **4,276,922 intercepted write operations** across
+  the full session; 4,268,122 are 32-bit operations in covered VGA mode,
+  with the rest predominantly startup text-mode writes.
+- The register trace has **19,915 `dac_rgb_commit` events**.
+  The base `_csv` has 149 one-second summary rows; the shorter summary
+  duration than 149.9 s reflects its final partial second not being
+  emitted in that stream.
+
+### Classification of the 3,642 changed VGA graphics-mode source images
+
+These categories are **mutually exclusive**, processed in this order:
+(1) backing VRAM changed within the sampled scanout;
+(2) backing VRAM changed only between scanouts;
+(3) effective palette changed only between scanouts;
+(4) no detected net change in any sampled backing buffer or palette.
+
+| Boundary signature | Changed source images | Share |
+|---|---:|---:|
+| Raw VGA/fastmem changed **during** scanout | **1,519** | 41.7% |
+| Raw VGA/fastmem changed **between** scanouts, but not during this one | **308** | 8.5% |
+| **Only effective palette** changed between scanouts | **1,060** | 29.1% |
+| **No difference** in sampled raw/fastmem/palette boundary hashes | **755** | 20.7% |
+| **Total** | **3,642** | **100%** |
+
+The effective-palette change is much more frequent **between** scanouts
+than **during** them: among 320×200 frames, 1,744 had
+`palette_changed_between=1`, while only 2 had
+`palette_changed_during=1`. Some of these did not produce different
+visible images (for example, changes to unused palette entries).
+
+**Caution:** These classes describe boundary-state differences, **not**
+proof that a particular state change caused the displayed image change.
+`vga.fastmem` was the source of the VGA scanout in this mode. A write to
+raw backing memory and its corresponding fastmem update can be the same
+guest drawing operation, not independent work.
+
+### Rechecking the previously unexplained image changes
+
+For each of the **3,642** changed graphics frames, join the previous
+completed-scanout timestamp and current one, and check observed VRAM
+write buckets and `dac_rgb_commit` timestamps in that interval.
+A boundary-sensitive join that counts write buckets with
+`previous_end < emulated_ms_end <= current_end` yields:
+
+| Observed VRAM writes | DAC RGB commits | Frames | With any sampled memory/palette state change | Without |
+|---|---|---:|---:|---:|
+| No | No | **696** | **0** | **696** |
+| No | Yes | **1,059** | 1,059 | 0 |
+| Yes | No | **1,332** | 1,273 | **59** |
+| Yes | Yes | **555** | 555 | 0 |
+| **Total** | | **3,642** | **2,887** | **755** |
+
+The **696** images with neither intercepted write operations nor DAC RGB
+commits in the preceding scanout interval also had **no net change** in
+sampled VRAM, fastmem or effective palette **during or between** the
+two scanouts. A further 59 changed images did have write callbacks but
+the sampled boundary state was unchanged.
+
+This is the most important unresolved result:
+
+> We can no longer explain those 696 changed source images merely by
+> postulating a **persistent change** to one of the sampled backing
+> buffers or effective palette that our write counter missed.
+> However, we **cannot** infer the absence of intermediate writes,
+> transient states, scanline mixing, other VGA control state,
+> or renderer/cache effects.
+
+The source-frame regional masks for the 755 boundary-invariant changes
+are not random; common patterns include `6666660000` (111 times),
+`0000000010` (89), and `c0c0c00000` (45). In 565 of those 755
+cases, the interval from the **previous changed source image** is
+approximately one 70 Hz VGA refresh (~14.3 ms), but others are separated
+by two or more refreshes. The repeated, localized masks justify targeted
+inspection of the line scanout and renderer rather than blindly changing
+PIT/VGA frequencies.
+
+### Interpretation and next controlled experiment
+
+The scanmem hook samples after the frame's VGA drawing source has been
+selected, before the scheduled scanline work, and once after completing
+that scanout. The sample interval is around **12.711 ms** in the stable
+graphics mode, while the vertical refresh period is **14.268 ms**.
+This brackets most of the picture but **does not sample every line**.
+
+Possible mechanisms for the 696 cases include:
+
+1. **Transient modifications** to VRAM that are restored before the
+   next boundary sample (either in a visible or hidden bank).
+2. Source lines read from VRAM at **different moments** during a scanout,
+   producing a mixed/stale source image, even if the two boundary
+   snapshots are equal.
+3. Other VGA draw-state changes not fully covered by the CRTC/panning
+   and palette trace (including scanline-specific state).
+4. **Renderer/scaler cached-line behavior**, overlay or other host-side
+   changes that modify the source cache independent of stable VGA memory.
+5. The possibility of misinterpreted **1 ms write bucket boundaries**;
+   individual guest write timestamps are not available for each store.
+
+Next, trace **specific scanlines or sparse frame samples only during
+short windows** around repeatedly occurring masks, not all lines for
+the full game. For each targeted line record:
+
+- The precise emulated time its draw handler runs.
+- Its display-memory address / split-line state and pixel format.
+- Its **raw/fastmem source-line hash immediately before drawing**, plus
+  the produced renderer source-line hash after drawing, where feasible.
+- Whether a source line differs from the previous completed scanout
+  while its source backing pixels and effective palette still match.
+- Optional granular sampling of actual guest VRAM writes to that line
+  in just the selected short time window.
+
+Compare these samples with the `*_frames.csv` `region_mask` and the
+existing `*_regs.csv`, avoiding timing or guest-program modifications.
+
+**Do not conclude that the 696 cases are emulation bugs without the
+targeted line-level evidence.** We still have not measured actual
+MK2 simulation ticks.
+
 ## Context to restore in a new chat
 
-> We are working on private research into DOSBox Staging's Mortal Kombat II DOS frame pacing. Repo: `WildGer/dosbox-staging`, branch `mk2-timing-research`. We instrumented PIT0, IRQ0, VGA 3DAh and refresh, source-frame hashes and 8×5 changed regions, VGA memory page-handler writes, CRTC 0C/0D start address, panning, DAC colour commits and latches. MK2 PIT0 is ~60.052 Hz (divisor 19869), VGA ~70.09 Hz; a reproducible distinct-source-frame interval pattern 3-1-1-2 VGA refreshes occurs at 20k/40k/80k CPU cycles. Graphics-mode CRTC display start and panning remained zero in a 2026-11-09 sample; DAC palette cycling and VRAM write bursts exist. ~749 changed source images in that sample did not align with a write or DAC commit in the preceding coarse interval, but coverage/timestamp limitations prevent attributing a root cause. A new `_scanmem.csv` trace now samples raw VGA RAM, fastmem and effective DAC palette at scanout start/end to test whether memory or palette changes during/between scanouts; it is **not yet Windows-built or runtime-validated**. Please first review the actual branch and this findings document, then build/test/analyze the next five-CSV capture. We have not modified the original MK2 game assets or timing.
+> We are investigating DOSBox Staging's MK2 DOS visual frame pacing (private use, no game assets). Repo: `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read this findings log and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz (divisor 19869), VGA ~70.09 Hz; the 3-1-1-2 sequence of source-image-change intervals recurs at 20k, 40k and 80k CPU cycles. We installed five opt-in CSV probes: PIT/IRQ/VGA, visual frames + 8x5 regions, VGA handler write bursts, CRTC/panning/DAC events, and scanout-start/end hashes of raw VGA memory, fastmem and the effective palette. All five ran on Windows in the 2026-11-10 40k-cycle capture `mk2_40000_20261110_124505`: 10,505 scanouts / 3,678 changed images total; in 320x200 mode, 9,975 scanouts / 3,642 changed. The boundary probe validated exact image-hash and scanout-index agreement. It classified 1,519 changed graphics frames with VRAM mutation during scanout, 308 with VRAM mutation between scanouts only, 1,060 with palette-only change between scanouts, and 755 without any detected net boundary change. Of those 755, 696 also lacked observed VRAM writes or DAC RGB commits in the preceding completion interval. These 696 are NOT established emulation bugs: transient writes, scanline sampling, other VGA state or renderer cache could explain them. No timing changes have been made. Next: focused per-scanline source/address/output hashes and timestamps around recurring region patterns; compare `*_frames.csv` and register/write traces. The source CSVs are NOT committed to GitHub; ask for them if needed.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload the five CSVs again. Maintain this document when new evidence changes a hypothesis.
