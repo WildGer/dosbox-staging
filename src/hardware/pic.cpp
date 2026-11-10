@@ -18,6 +18,12 @@
 
 // Default-off guard used by the guest RAM write helpers.
 bool Mk2SignalWatchActive = false;
+bool Mk2SignalInstructionActive = false;
+
+void Mk2SignalOnInstructionBoundary()
+{
+	Mk2SignalProbe::Get().OnInstructionBoundary();
+}
 
 bool Mk2SignalBeforeWrite(const PhysPt addr, const uint8_t size)
 {
