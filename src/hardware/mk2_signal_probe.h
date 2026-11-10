@@ -277,6 +277,14 @@ public:
         row.ebp = reg_ebp;
         row.edi = reg_edi;
         row.cs = SegValue(cs);
+        // Two global object pointers are read by the callback code:
+        // 0x2133B5 and 0x22047D. The latter compares WORD +0x1A
+        // and the former passes both objects to 0x21374A.
+        // Sample at the exact dispatcher boundary so that future
+        // analysis can distinguish object-state changes from the
+        // 60-Hz scheduler and 70-Hz VGA refresh.
+        row.object_a = ReadObjectFields(row.ds_base, 0x002b5fc2u);
+        row.object_b = ReadObjectFields(row.ds_base, 0x002b6146u);
         CaptureDispatchCallbackCode(row.handler_eip, row.emulated_ms);
     }
 
@@ -310,6 +318,13 @@ private:
         std::array<uint8_t, DispatchCodeBytes> bytes = {};
     };
 
+    struct ObjectFields {
+        uint32_t pointer = 0;
+        int16_t field_1a = 0;
+        int16_t field_1e = 0;
+        bool valid = false;
+    };
+
     struct DispatchRow {
         double emulated_ms = 0;
         uint32_t task_offset = 0;
@@ -322,6 +337,8 @@ private:
         int16_t remaining = 0;
         uint16_t ds = 0;
         uint16_t cs = 0;
+        ObjectFields object_a = {};
+        ObjectFields object_b = {};
     };
 
     struct CodeSnapshot {
@@ -423,7 +440,11 @@ private:
             dispatch_output << "event_index,emulated_ms,event,cs,ds,"
                                "ds_base,task_offset,task_linear,"
                                "next_offset,remaining,handler_eip,"
-                               "ebp,edi,dropped_count\n";
+                               "ebp,edi,dropped_count,"
+                               "object_a_valid,object_a_pointer,"
+                               "object_a_field_1a,object_a_field_1e,"
+                               "object_b_valid,object_b_pointer,"
+                               "object_b_field_1a,object_b_field_1e\n";
         }
 
         // Only a small, selected set of callback ENTRY instructions is
@@ -589,6 +610,40 @@ private:
         dispatch_code_output.flush();
     }
 
+    static ObjectFields ReadObjectFields(const uint32_t ds_base,
+                                         const uint32_t global_offset)
+    {
+        ObjectFields result = {};
+        const uint64_t pointer_location =
+                static_cast<uint64_t>(ds_base) + global_offset;
+        constexpr uint64_t max_address =
+                std::numeric_limits<PhysPt>::max();
+        if (pointer_location > max_address - 4u) {
+            return result;
+        }
+        const uint32_t pointer =
+                mem_readd<MemOpMode::SkipBreakpoints>(
+                        static_cast<PhysPt>(pointer_location));
+        if (!pointer) {
+            return result;
+        }
+        const uint64_t object_linear =
+                static_cast<uint64_t>(ds_base) + pointer;
+        if (object_linear > max_address - 0x20u) {
+            return result;
+        }
+
+        result.pointer = pointer;
+        result.field_1a = static_cast<int16_t>(
+                mem_readw<MemOpMode::SkipBreakpoints>(
+                        static_cast<PhysPt>(object_linear + 0x1au)));
+        result.field_1e = static_cast<int16_t>(
+                mem_readw<MemOpMode::SkipBreakpoints>(
+                        static_cast<PhysPt>(object_linear + 0x1eu)));
+        result.valid = true;
+        return result;
+    }
+
     void FlushDispatch()
     {
         if (!dispatch_output.is_open()) {
@@ -606,14 +661,23 @@ private:
                             << row.remaining << ','
                             << row.handler_eip << ','
                             << row.ebp << ',' << row.edi
-                            << ",0\n";
+                            << ",0,"
+                            << static_cast<unsigned>(row.object_a.valid)
+                            << ',' << row.object_a.pointer
+                            << ',' << row.object_a.field_1a
+                            << ',' << row.object_a.field_1e
+                            << ',' << static_cast<unsigned>(row.object_b.valid)
+                            << ',' << row.object_b.pointer
+                            << ',' << row.object_b.field_1a
+                            << ',' << row.object_b.field_1e << '\n';
         }
         if (dispatch_dropped) {
             dispatch_output << ++dispatch_written << ','
                             << std::fixed << std::setprecision(6)
                             << PIC_FullIndex() << ",overflow,"
                             << "0,0,0,0,0,0,0,0,0,0,"
-                            << dispatch_dropped << '\n';
+                            << dispatch_dropped
+                            << ",0,0,0,0,0,0,0,0\n";
             dispatch_dropped = 0;
         }
         dispatch_count = 0;
