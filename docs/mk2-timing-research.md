@@ -198,6 +198,75 @@ the entire image or particular characters/background elements, compare
 the `region_mask` across successive `changed=1` rows. No image
 content or game executable is exported.
 
+## VGA memory-write timeline (`*_vram.csv`)
+
+The trace also creates `mk2_40000_<timestamp>_vram.csv` next to the two
+existing files. This third CSV correlates **guest writes to VGA page handlers**
+with IRQ0 delivery, VGA vertical-refresh events, and completed source scanouts.
+
+Data is aggregated into **1 millisecond of emulated time per row**. Idle
+millisecond buckets are omitted. No files are written from individual video
+memory write callbacks. Only the **first write timestamp** in each bucket is
+measured exactly; subsequent last-write timestamps are sampled every 32
+observed writes to reduce observer effect. All the event timestamps are in
+DOSBox's emulated PIC clock domain. Compare rows to `*_frames.csv` for the
+times of visually distinct images.
+
+| Column | Meaning |
+|---|---|
+| `emulated_ms_end` | End of the 1 ms emulated time bucket |
+| `write_ops` | Guest write operations (byte, word, dword) handled by VGA callbacks |
+| `guest_write_bytes` | Sum of guest write widths; **not** number of changed pixels |
+| `write8`, `write16`, `write32` | Breakdown of observed write operations by guest access width |
+| `first_write_ms` | Timestamp of the first guest VGA write in this 1 ms bucket |
+| `last_write_sample_ms` | Timestamp sampled at first write and every 32nd write; **not guaranteed exact last-write time** |
+| `irq0_dispatches`, `last_irq0_ms` | IRQ0 dispatch count and last IRQ0 timestamp in the bucket |
+| `vga_refreshes`, `last_vga_ms` | VGA refresh-event count and last timestamp |
+| `scanouts`, `last_scanout_ms` | Completed source-frame count and last completion time |
+| `vga_mode` | Internal VGA memory mode enum for the selected page-handler configuration |
+| `page_handler_covered` | 1 when the selected conventional VGA handler intercepts writes, 0 when direct mapped |
+| `mapping_changes` | Number of VGA handler-mode changes in the bucket |
+
+### Coverage limitations and interpretation
+
+**The write counts only include VGA page-handler callbacks.** DOSBox sometimes
+maps guest writes directly to backing memory (`VGA_Map_Handler` and LFB direct
+mapping), bypassing those callbacks. This probe **does not reroute those
+mappings**, deliberately avoiding timing and memory-behaviour changes.
+
+- If `page_handler_covered=0`, the absence of `write_ops` cannot be
+  interpreted as an absence of VRAM writes. For high-confidence conclusions,
+  analyze samples with `page_handler_covered=1` and nonzero write counts.
+- `page_handler_covered=1` describes the **selected conventional VGA page
+  handler**, not all possible concurrent direct-mapped LFB or external
+  hardware engines. This is particularly relevant for SVGA/VESA games, though
+  it should be less relevant to MK2's conventional VGA modes.
+- A guest write operation may rewrite a value that is already present, touch
+  an unused video-memory bank, or update part of a line still waiting to be
+  scanned out. The actual image change is established separately by
+  `*_frames.csv`, not by counting guest write operations.
+- Because the probe samples the first write timestamp and only every 32nd
+  subsequent write, it is suitable for **millisecond-scale activity bursts**,
+  **not** locating each individual CPU store within a scanline.
+- CPU overhead and CSV volume can be significant in write-intensive scenes.
+  Repeat a comparable no-trace control (`DOSBOX_MK2_TRACE=0`) to ensure
+  observer effects have not changed MK2's perceived timing.
+
+### Next analysis
+
+For each recurring 3-1-1-2 sequence in `*_frames.csv`, align
+`emulated_ms` to the 1 ms `emulated_ms_end` buckets and ask:
+
+1. Does MK2 issue a similar write burst every ~16.65 ms after IRQ0, or do
+   distinct write bursts precede separate visually changed frames?
+2. Are the apparent 14/28/43 ms image-change intervals already visible in
+   **write activity**, or do they emerge only on the VGA scanout boundary?
+3. Do long unchanged screen intervals correspond to no writes, writes to an
+   unobserved mapping, or writes that do not alter visible pixels?
+
+This instrumentation cannot by itself determine the game's simulation
+update rate; that would require targeted guest-side hook points.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -205,6 +274,8 @@ content or game executable is exported.
 - `src/hardware/video/vga_misc.cpp`: port 3DAh reads and vertical retrace bit.
 - `src/hardware/video/vga_draw.cpp`: one call per emulated vertical refresh.
 - `src/hardware/mk2_timing_probe.h`: low-overhead counters and CSV writer.
+- `src/hardware/video/vga_memory.cpp`: per-write, read-only VGA page-handler callbacks and coverage mode.
+- `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
 - `src/gui/render/render.cpp`: completed source-frame sampling after source latch.
 - `src/gui/render/mk2_frame_probe.h`: frame and visible-palette fingerprints, per-scanout CSV.
 
@@ -215,7 +286,7 @@ early DOS prompt rows as MK2 gameplay measurements.
 ## Validation and limits
 
 The PIT/VGA CSV implementation was previously built and exercised by the user
-on Windows. **The newly added frame probe has not yet been compiled or
+on Windows. **The newly added VGA write probe has not yet been compiled or
 runtime-validated on the user's Windows machine.**
 
 Time-counter overhead is minimized by counting in hot paths and writing once
