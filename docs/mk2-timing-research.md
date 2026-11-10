@@ -343,8 +343,11 @@ rate or a unique rendering root cause.
 ## NEW: scanout boundary memory/colour comparison (`*_scanmem.csv`)
 
 In addition to the four existing CSV streams, the branch now emits a **fifth**
-file named like `mk2_40000_20261109_XXXXXX_scanmem.csv`. It is **new and
-has not yet been built or runtime-tested on Windows**.
+file named like `mk2_40000_20261110_124505_scanmem.csv`. **The
+2026-11-10 capture compiled and ran successfully on Windows**. All 10,505
+sampled scanouts aligned exactly with the source-frame CSV hashes and times.
+See the linked findings log for the classification of the remaining 696
+source-image changes without observed VRAM writes or DAC RGB commits.
 
 It compares read-only fingerprints captured **at the start of scheduled
 scanline drawing and at completion of the same non-aborted scanout**:
@@ -399,8 +402,11 @@ early DOS prompt rows as MK2 gameplay measurements.
 ## Validation and limits
 
 The PIT/VGA CSV implementation was previously built and exercised by the user
-on Windows. **The newly added VGA register probe has not yet been compiled or
-runtime-validated on the user's Windows machine.**
+on Windows. **The five-stream integration, including the VGA register
+and scanout-memory probes, has now been built and runtime-validated on the
+user's Windows machine in the 2026-11-10 capture.** This verifies recording
+and cross-file alignment; it does not establish the accuracy of every sampled
+guest memory access or a cause for MK2's pacing.
 
 Time-counter overhead is minimized by counting in hot paths and writing once
 per emulated second. Frame tracing adds source-buffer and per-region fingerprints for each
