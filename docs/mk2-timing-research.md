@@ -892,6 +892,57 @@ animation frames, inputs or combat collision before interpreting
 its recurrence as MK2's game simulation rate. Do not assume
 every 60-Hz counter update corresponds to one simulation step.
 
+### 2026-11-10: private snapshots of callback entry code (`*_dispatch_code.csv`)
+
+Analysis of actual `mk2_normal_40000_20261110_174841_dispatch.csv`
+found **17,403 task dispatches, 20 task nodes and 126 unique
+callback target EIPs**; there were **no overflow rows**.
+Two nodes (`0x276A8C` and `0x276774`) normally dispatch
+at ~60 Hz, with major targets `0x2133B5` and
+`0x22047D`; but their actual **combat logic role remains
+unverified**. See the latest findings section for
+cross-correlation with the ~70.09-Hz VGA stream.
+
+A new, **default-off diagnostic on the same existing
+signal-watch launcher**, records the first 256 bytes
+at each of up to **14 predefined callback targets**
+only when their dynamic `JMP [ESI+0x1C]` dispatch actually
+occurs. Additional local file:
+`*_dispatch_code.csv`. It can be extracted using the same
+`scripts/extract_mk2_guest_code.py` command as the earlier
+snapshots; the result contains private snippets from the
+user's own loaded MK2, **not distributable assets**.
+
+After `git pull --ff-only`, rebuilding and executing the
+previous working MK2 normal-core 40k launcher with
+`DOSBOX_MK2_SIGNAL_WATCH=1` and a unique
+`DOSBOX_MK2_TRACE` path:
+
+```powershell
+# Run from the DOSBox Staging repository root.
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_dispatch_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $latest) {
+    Write-Host "No dispatch code found; check build and environment flags"
+} else {
+    python scripts/extract_mk2_guest_code.py "$($latest.FullName)"
+}
+```
+
+The output can contain fewer than 14 sites if the user
+never entered a phase executing a particular callback.
+The extractor prints `ndisasm -b 32 -o <guest EIP>`
+commands; **do not** interpret partial snapshots as
+complete functions. The objective is to identify actual
+game-state updates, not to assign simulation rate based
+on callback frequency alone.
+
+**Status:** this new callback code sampler has been
+committed but not yet compiled/runtime-validated on Windows.
+It must not be used for host FPS benchmarks.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -912,6 +963,7 @@ every 60-Hz counter update corresponds to one simulation step.
 - `scripts/analyze_mk2_signal_trace.py`: compare producer and consumer events without assuming gameplay tick cadence.
 - `src/cpu/core_normal.cpp` and `src/hardware/mk2_signal_probe.h`: targeted read-only capture at instruction `0180:00205531` for the delayed-task indirect jump (`_dispatch.csv`).
 - `scripts/analyze_mk2_dispatch_trace.py`: group callback destinations and task recurrence in emulated time.
+- `src/hardware/mk2_signal_probe.h`: opt-in, one-time 256-byte private callback snapshots at 14 selected dispatched EIPs (`_dispatch_code.csv`).
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
