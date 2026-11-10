@@ -655,8 +655,9 @@ Set **both** `DOSBOX_MK2_TRACE` (as in all earlier experiments)
 and `DOSBOX_MK2_SIGNAL_WATCH=1` before launching. Use **core=normal**.
 The probe samples emulated seconds 30–150. It does not capture
 direct-mapped writes made by dynamic translation and may miss pointer
-changes between consumer refreshes. It has **not yet been compiled
-or runtime-validated on Windows**.
+changes between consumer refreshes. The **expanded** watch has **not yet been compiled or runtime-validated
+on Windows**; the initial writer watch successfully logged 6,990
+clear instructions but no observed producer stores.
 
 The `*_signal.csv` output contains event `resolve`,
 `pointer_write`, `pointer_same`, `signal_write` or
@@ -696,6 +697,56 @@ are needed for this stage. Empty/header-only output means we have
 not yet found a matched producer event; check `core=normal`,
 the requested environment variable, and the sampled consumer
 addresses before making conclusions.
+
+### 2026-11-10: why the first writer watch found only clears
+
+The user's first completed `*_signal.csv` analysis reported **6,991
+rows**: one `resolve` and **6,990 `signal_write` rows**, all
+at `0180:002054AD`, and all changes from nonzero to zero.
+Pointer `0x00009B00` resolved to linear target `0x00009B24`
+through the consumer's DS segment in that run. **No activation
+(`0 -> nonzero`) was observed by the first write hook.**
+The median reset spacing was **16.652 ms** (range 3.613–172.827 ms),
+close to the observed **~60.052 Hz** PIT0 period, but these resets are
+not established as game simulation ticks.
+
+**Important: the first probe was incomplete, not evidence that the
+producer did not exist.** In `BeforeGuestStore`, it rejected writes
+whenever `cpu.pmode` was false or `cpudecoder` did not equal
+`CPU_Core_Normal_Run`; those conditions may omit an interrupt or
+DOS callback producer. Moreover, some writes can bypass the
+ordinary guest store helpers or use a different linear alias.
+
+The updated, **still opt-in** watch now:
+
+- Checks the resolved linear write target regardless of the **current
+  CPU mode/decoder**, while still requiring a verified consumer
+  pointer and the 30–150 s emulated observation window.
+- Adds a **bounded normal-core instruction-boundary checker**:
+  on approximately every 60th IRQ0 delivery while the known
+  consumer is waiting, it checks the watched DWORD for at most
+  **16,000 subsequent interpreted instructions**. If the DWORD
+  changes, logs `opcode_transition` with the preceding guest
+  instruction's CS:EIP and before/after values, stopping early
+  after a detected zero-to-nonzero transition.
+- Uses `Mk2SignalInstructionActive` to keep the normal-core opcode
+  hot path to a single conditional when the check is not armed.
+
+The older direct-store events remain `signal_write` and
+`signal_same`. **Both mechanisms can observe the same change**:
+the analyzer deliberately separates their counts. The preceding
+opcode's EIP is a candidate instruction to verify by disassembly;
+a non-guest callback between boundaries could also alter the
+memory. This is a diagnostic-only run: do **not** compare CPU cost
+or host FPS with the earlier baseline.
+
+**Build this updated branch before repeating the test.**
+Keep `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`,
+`core=normal`, 40,000 protected cycles and gameplay after emulated
+30 s. After quitting, run the same
+`scripts/analyze_mk2_signal_trace.py` command on the *new*
+`_signal.csv`. Share the CSV and analyzer output, especially
+`opcode_transition` and any positive `signal_write` PCs.
 
 ## Source hooks
 
