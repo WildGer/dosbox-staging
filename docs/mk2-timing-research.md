@@ -532,15 +532,38 @@ It deliberately does **not** label hot locations as game simulation
 updates. A later, targeted experiment must confirm a routine with guest
 disassembly or direct state advancement before counting its calls.
 
-**Validation required:** The guest probe is integrated into IRQ0, VRAM
-write-bucket entry, VGA 3DAh reads and the scheduler, but **has not yet
-been compiled or run on Windows**. Build and play **at least 150
-emulated seconds** (preferably 160+) at 40,000 cycles to capture the full
-30–150s window. Collect all seven CSVs and the launch log. First verify
-non-empty `_guest.csv`, recognizable `CS:EIP` clusters, and timestamps
-inside the window. Then evaluate whether the sampled locations are stable
-across gameplay versus menus and whether candidate locations correlate
-with meaningful game-state changes.
+**Validated on Windows (2026-11-10):** The user compiled and ran the
+seventh guest-context probe at 40,000 cycles. The analyzer reported
+**30,385 samples** over the 30–150s window. All 1,473
+`vga_status_rising` and all 5,029 `vga_status_sample` events
+reported `CS:EIP=0180:002196D5`; 7,097 of 7,207 IRQ0 pre-dispatch
+samples reported `0180:00205489`; 4,676 first-VRAM-write
+samples clustered mainly around EIP `00204200–002049FF`.
+
+**This validates collection, not exact guest instruction addresses
+or true logic ticks.** Protected-mode `core=auto` uses dynamic
+translation. An I/O callback may report a saved EIP at a translated-block
+boundary. Before locating a game-loop routine, run a short
+`core=normal` comparison in a separate capture:
+
+```powershell
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
+& "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
+```
+
+The normal core executes guest instructions individually and is
+considerably slower. This is a **code-location verification run only**;
+do not equate its host timing and changed-image cadence with the
+existing dynamic-core measurements. Sample some active gameplay after
+emulated 30s, then inspect the new `_guest.csv` using the same
+`scripts/analyze_mk2_guest_trace.py` script.
+
+Disassemble matching candidate code using the correct DOS extender
+and load map. `EIP` is a guest virtual offset, not automatically an
+offset into the original MK2.EXE file. A verified code site that updates
+gameplay state will be needed before implementing a real simulation
+tick counter.
 
 ## Source hooks
 
