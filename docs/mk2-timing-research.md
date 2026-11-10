@@ -377,7 +377,7 @@ Test it with a 40k-cycle fight of ~60–90 s and keep all **five** CSV files.
 See the [research log](mk2-timing-research-findings-2026-11-09.md) for the
 validation checklist and recorded findings.
 
-## NEW: sparse per-scanline source and renderer-cache comparison (`*_lines.csv`)
+## Verified: sparse per-scanline source and renderer-cache comparison (`*_lines.csv`)
 
 The sixth opt-in CSV, e.g. `mk2_40000_20261110_XXXXXX_lines.csv`,
 collects **individual VGA scanline samples** in tightly scoped windows.
@@ -439,14 +439,29 @@ The test is restricted to the observed MK2 graphics configuration and does
 not claim coverage of every DOS graphics mode. These source-cache rows
 are **not** equivalent to final GPU presentation timings.
 
-**Validation required:** This sixth probe has been committed and wired to
-the VGA scanout and renderer, but it has **not yet been built or exercised on
-the user's Windows machine**. Rebuild the current branch, run MK2 for at
-least 85 seconds to include the first three windows, then check
-`*_lines.csv` is non-empty, line indices stay in 0–199, and sampled
-`scanout_index` values appear in `*_frames.csv`. Collect all **six**
-CSV files together; compare `*_lines.csv` with matching `region_mask`
-and `_scanmem.csv` flags in the same frame, not across unrelated runs.
+**Windows runtime validated in 2026-11-10 capture**
+`mk2_40000_20261110_131108`: 350 complete sampled graphics frames
+and 70,000 line rows; all five one-second windows produced the expected
+70 frames of 200 lines each; sampled line and frame indices align with
+`*_frames.csv`. All 70,000 VGA RGB output line hashes match their
+corresponding latched renderer-cache row hashes. Out of 69,000 comparable
+(non-baseline) line rows, **every one of the 14,259 visibly changed RGB
+lines had a changed source-index hash and/or effective palette hash**.
+Not one observed RGB line change lacked both changes.
+
+In that run, 837 changed graphics frames with no observed VGA writes/DAC
+commits or net VRAM/palette changes between current scanout boundaries
+**all followed scanouts with VRAM modified during the previous draw**.
+32 of these were directly line-sampled, with source-index line changes.
+This supports next-scanout visibility of writes made after earlier lines
+were already read; it does not prove a defect or measure MK2 simulation
+frequency. See the [research findings](mk2-timing-research-findings-2026-11-09.md)
+for the full method, counts and limitations.
+
+For additional capture, run MK2 for at least 85 seconds to include the
+first three windows, and collect all **six CSV files from the same run**.
+Compare sampled `scanout_index` with `_frames.csv` `region_mask`
+and `_scanmem.csv` data, not with unrelated sessions.
 
 ## Source hooks
 
