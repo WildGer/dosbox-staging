@@ -12,6 +12,7 @@
 #include <string>
 
 #include "hardware/pic.h"
+#include "hardware/mk2_guest_probe.h"
 
 // Collects one lightweight counter update per guest VGA write operation,
 // then emits at most one CSV row per emulated millisecond. Importantly,
@@ -32,6 +33,7 @@ public:
         if (!write_ops) {
             first_write_ms = PIC_FullIndex();
             last_write_sample_ms = first_write_ms;
+            Mk2GuestProbe::Get().OnVramBurst(first_write_ms);
         }
         ++write_ops;
         guest_write_bytes += guest_bytes;
