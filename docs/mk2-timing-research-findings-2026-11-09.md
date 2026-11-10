@@ -5,7 +5,7 @@
 **Working platform:** Windows 11, Visual Studio 2026 (CMake `release-windows` preset), ClangCL, vcpkg at `C:\vcpkg`
 **Research date:** 2026-11-09
 **Game:** GOG installation of *Mortal Kombat II*, launched as an external DOS .EXE.
-**Status:** All five CSV instrumentation streams now run on Windows, including the new boundary memory-state (`_scanmem.csv`) trace. The 2026-11-10 five-CSV capture has been analyzed below. Next open question: 696 changed source images with no preceding observed VRAM write/DAC commit and no sampled backing-memory or palette boundary change.
+**Status:** Five telemetry streams have been validated on Windows. A sixth, **sparse per-scanline** probe (`_lines.csv`), has been committed on 2026-11-10 but **has not yet been compiled or runtime validated on Windows**. The immediate research question is to explain 696 changed source images in the previous capture with no observed VRAM writes/DAC commits and no net memory/palette change at scanout boundaries.
 
 ## Scope and non-negotiable constraints
 
@@ -52,7 +52,8 @@ All filenames share the launch's `DOSBOX_MK2_TRACE` prefix:
 | `_frames.csv` | Per-completed-scanout RGB-equivalent image hash, repeated images, real/emulated intervals, 8×5 regional change mask | `gui/render/mk2_frame_probe.h`, `gui/render/render.cpp` |
 | `_vram.csv` | VGA memory-page-handler write-operation bursts aggregated by **1 ms emulated**, plus IRQ0, VGA and completion timestamps and handler coverage | `hardware/video/vga_memory.cpp`, `hardware/mk2_vram_probe.h` |
 | `_regs.csv` | Individual CRTC start-address programming/latching, horizontal panning programming/latching, DAC colour commits and refresh/scanout state | `hardware/video/vga_crtc.cpp`, `hardware/video/vga_attr.cpp`, `hardware/video/vga_dac.cpp`, `hardware/video/vga_draw.cpp`, `hardware/mk2_vga_regs_probe.h` |
-| **`_scanmem.csv`** | **New, not yet runtime validated.** At beginning/end of a scanout, hash raw backing VGA memory, its fastmem cache and the effective RGB palette; cross-reference the existing finished source-image hash | `hardware/mk2_scanmem_probe.h`, `hardware/video/vga_draw.cpp`, `gui/render/render.cpp` |
+| `_scanmem.csv` | **Validated in 2026-11-10 capture.** Start/end raw VRAM, fastmem, effective DAC RGB hashes and frame cross-reference | `hardware/mk2_scanmem_probe.h`, `hardware/video/vga_draw.cpp`, `gui/render/render.cpp` |
+| **`_lines.csv`** | **New; Windows validation pending.** Sparse, per-scanline source, palette, VGA output and completed renderer source-cache hashes | `hardware/mk2_scanline_probe.h`, `hardware/video/vga_draw.cpp`, `gui/render/render.cpp` |
 
 `_frames.csv` has a sequential scanout index. `_regs.csv` timestamps are fractional PIC-emulated milliseconds; `_vram.csv` buckets are **coarser** (1 ms) and cannot timestamp each individual CPU store exactly.
 
@@ -313,8 +314,87 @@ existing `*_regs.csv`, avoiding timing or guest-program modifications.
 targeted line-level evidence.** We still have not measured actual
 MK2 simulation ticks.
 
+## New experiment: sparse line-level VGA/renderer trace (2026-11-10)
+
+**Implementation committed on `mk2-timing-research`; not yet compiled or
+runtime-validated on the user's Windows machine.**
+
+The new `src/hardware/mk2_scanline_probe.h` is called immediately before
+`VGA_DrawLine()` reads a source scanline and immediately after it returns
+its 320×4-byte RGB line; at frame completion we compare with the
+corresponding row of the `RENDER_EndUpdate` source latch.
+
+Collection is restricted to the **320×200 M_VGA** mode seen in the test.
+The probe does not touch MK2 game files, emulated timing, IRQs, VRAM, the DAC
+or resulting pixels. It captures a source-index-line fingerprint and effective
+palette fingerprint when the line is drawn, the VGA-produced BGRX line
+fingerprint, and the renderer source-cache line fingerprint on completion.
+The hook records the **actual draw address and masked source offset** and
+**fractional emulated PIC time**.
+
+The sixth file is `mk2_40000_<timestamp>_lines.csv`; it is activated by
+the **existing** `DOSBOX_MK2_TRACE` environment variable, with no new launcher
+flag. To limit observer effect, sampling happens **only** in emulated seconds
+40, 60, 80, 100 and 120 (one-second windows each). During the windows all
+200 source lines of eligible full scanouts are recorded. Per-line records
+are buffered in RAM and written after the frame completes, not on the VGA
+line events.
+
+**Fields of interest:** `scanout_index`, `line`, `frame_begin_ms`,
+`line_sample_ms`, `frame_complete_ms`, `draw_address`,
+`masked_offset`, `source_kind`, `source_changed`,
+`palette_changed`, `output_changed`, `cache_changed`,
+`output_equals_cache`, and the four hashes. The first sampled frame
+of each one-second window has `previous_valid=0` (baseline).
+
+### What the next capture should determine
+
+1. When `*_frames.csv` reports a new visible image but `_scanmem.csv`
+   sees unchanged boundary states, do **particular source-index lines**
+   differ at the instant VGA reads them, even though start/end whole-VRAM
+   hashes agree?
+2. When source indices are unchanged, did effective palette entries change
+   between sampling particular lines? A whole-palette hash can change for
+   unused colours, so compare against observed output-line changes.
+3. Is `vga_output_hash` different from the latched
+   `renderer_cache_hash` in any line? That would identify a discrepancy
+   between VGA output and renderer source-cache retention (the probe is
+   before ReelMagic insertion and software scaling; interpret cautiously).
+4. How do changed lines map to the 8×5 `region_mask` for the same
+   `scanout_index`? Example repeated masks in the previous capture were
+   `6666660000`, `0000000010`, and `c0c0c00000`.
+5. Does a line become visible with different RGB values despite an
+   unchanged sampled source index and palette? That would motivate a more
+   targeted trace of graphics register state during line drawing.
+
+### Test and handoff
+
+```powershell
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+$env:VCPKG_ROOT = "C:\vcpkg"
+cmake --build --preset=release-windows --parallel 8
+```
+
+Use the same `Launch-MK2-Timing-Direct.ps1` script at 40,000 cycles,
+and play long enough to overlap at least the 40 s, 60 s and 80 s
+sample windows. Upload all **six** CSVs for the same prefix.
+
+First validate the `_lines.csv` schema, confirm lines 0–199,
+sampled `scanout_index` values are a subset of `_frames.csv`, and
+check typical frame row coverage. If `_lines.csv` is empty or frames
+lack rows, **investigate source mode/line dimensions before interpreting
+absence of changes as evidence**. Treat trace overhead as a limitation
+and use a trace-disabled control if necessary.
+
+The previous five streams are already validated; this sixth stream
+alone requires build/runtime validation. No conclusions about MK2 game
+simulation FPS or a fix to clocks should be made from instrumentation
+until the line-level data are analyzed.
+
 ## Context to restore in a new chat
 
-> We are investigating DOSBox Staging's MK2 DOS visual frame pacing (private use, no game assets). Repo: `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read this findings log and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz (divisor 19869), VGA ~70.09 Hz; the 3-1-1-2 sequence of source-image-change intervals recurs at 20k, 40k and 80k CPU cycles. We installed five opt-in CSV probes: PIT/IRQ/VGA, visual frames + 8x5 regions, VGA handler write bursts, CRTC/panning/DAC events, and scanout-start/end hashes of raw VGA memory, fastmem and the effective palette. All five ran on Windows in the 2026-11-10 40k-cycle capture `mk2_40000_20261110_124505`: 10,505 scanouts / 3,678 changed images total; in 320x200 mode, 9,975 scanouts / 3,642 changed. The boundary probe validated exact image-hash and scanout-index agreement. It classified 1,519 changed graphics frames with VRAM mutation during scanout, 308 with VRAM mutation between scanouts only, 1,060 with palette-only change between scanouts, and 755 without any detected net boundary change. Of those 755, 696 also lacked observed VRAM writes or DAC RGB commits in the preceding completion interval. These 696 are NOT established emulation bugs: transient writes, scanline sampling, other VGA state or renderer cache could explain them. No timing changes have been made. Next: focused per-scanline source/address/output hashes and timestamps around recurring region patterns; compare `*_frames.csv` and register/write traces. The source CSVs are NOT committed to GitHub; ask for them if needed.
+> Research project: DOSBox Staging MK2 DOS visual timing, private repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. PIT ~60.052 Hz (divisor 19869), VGA ~70.09 Hz; source-image differences often follow repeated 3-1-1-2 refresh intervals at 20k/40k/80k CPU cycles. Five CSV probes are Windows-validated. The last all-five capture `mk2_40000_20261110_124505` had 10,505 scanouts, 3,678 changed images; 9,975 mode-320x200 scanouts and 3,642 changes. 1,519 changed graphics frames had VRAM mutation during a scanout, 308 only between scanouts, 1,060 palette-only between scanouts and 755 no sampled net boundary difference. 696 of the 755 additionally had no intercepted VRAM write/DAC RGB commit between complete scanouts. These are NOT proven emulation bugs; transient writes, scanline mixing, other VGA state or renderer cache effects remain possible. A SIXTH CSV, `_lines.csv`, is now committed (but NOT YET Windows-built) and samples every source line only during emulated seconds 40,60,80,100,120. It compares source-index hash, effective palette hash, VGA-produced RGB line, and renderer source-cache line; timestamps/address/line and frame index allow cross-CSV correlation. Build/test this newest branch, capture at least ~85 seconds at 40k cycles, then upload all six CSVs and investigate the 696-class cases, with attention to recurring region masks. No timing or game binary modifications. Raw CSVs are not in GitHub.
 
-**Do not assume the source CSVs are in the repository.** If necessary, upload the five CSVs again. Maintain this document when new evidence changes a hypothesis.
+**Do not assume the source CSVs are in the repository.** If necessary, upload the previous five CSVs again, or preferably all six from the next run. Maintain this document when new evidence changes a hypothesis.
