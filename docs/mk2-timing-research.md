@@ -605,7 +605,8 @@ $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
 & "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
 
-$codeCsv = $env:DOSBOX_MK2_TRACE -replace '\.csv
+$codeCsv = Join-Path (Split-Path $env:DOSBOX_MK2_TRACE -Parent) ((Split-Path $env:DOSBOX_MK2_TRACE -LeafBase) + "_guest_code.csv")
+Test-Path "$codeCsv"
 python scripts/extract_mk2_guest_code.py "$codeCsv"
 ```
 
