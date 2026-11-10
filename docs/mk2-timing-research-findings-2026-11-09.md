@@ -1300,8 +1300,126 @@ which *downstream* code advances fighter physics, animation
 and input state. **Do not change PIT or VGA clocks to force
 a target FPS.**
 
+## Three producer/consumer code snippets, actual x86 disassembly (2026-11-10)
+
+**Grounding:** user uploaded three **128-byte binary snapshots** from their
+private MK2 execution:
+
+- `producer_at_write_000008AF.bin`: guest `09B0:08AF`, decoded
+  using **16-bit** x86 instruction mode.
+- `producer_preceding_32_0000088F.bin`: guest `09B0:088F`, decoded
+  as **16-bit** x86, but the first bytes may begin in the middle
+  of an instruction. The 96-byte overlap with the 08AF binary
+  **matches exactly**, validating the in-memory snapshot alignment.
+- `consumer_after_wait_2054FE_002054FE.bin`: guest
+  `0180:002054FE`, decoded as **32-bit** x86.
+
+These three snippets were really inspected with `objdump`
+and their byte overlap cross-checked. **Do not commit the actual
+guest code bytes or disassembly files to GitHub.**
+
+### Producer `09B0:08AF`: two 32-bit counters built from 16-bit words
+
+The first instruction at `08AF` is `inc word ptr [0x0024]`,
+followed by `jne 0x08B9` and `inc word ptr [0x0026]`.
+Together these increment the **little-endian DWORD
+`DS:[0x0024..0x0027]`**, propagating the carry only when
+the low word rolls over to zero.
+
+At `08B9`, the next sequence similarly increments
+`DS:[0x0028..0x002B]` via two 16-bit words
+(`INC [0028]`, conditional `INC [002A]`).
+
+This directly explains the previous **6,108 producer
+zero-to-nonzero observations** at the watched `DS:[0024]`
+and **6,108 consumer clears** at `0180:002054AD`.
+The first is a **work-ready/time counter** that can accumulate
+increments before the protected-mode consumer empties it;
+it is not merely a boolean wake-up flag.
+The second DWORD is a separate counter, whose consumers
+are **not yet identified**.
+
+The preceding-code snippet contains a plausible instruction
+boundary at `08A8`: `test byte ptr DS:[003C],0xFF`
+then `jne 0x900`. This conditionally bypasses the increment
+sequence; exact higher-level semantics are unknown.
+Some other nearby instructions perform conditional calls
+through pointer `DS:[0014]` and absolute calls to
+`0x07CA`, but none of those calls is identified here
+as game logic. **The disassembly origin at 088F may be
+mid-instruction; early instruction interpretation is uncertain.**
+
+The observed producer `CS=09B0` and `CS.base=0x9B00`
+are consistent with 16-bit segmented code. They do
+**not alone prove it is the IRQ0 interrupt handler**.
+The IRQ0 IVT `segment:offset` values were written to
+`*_signal_code.csv` by the new probe, but the user uploaded
+the three `.bin` files, **not that CSV metadata**.
+The direct association with the vector is still **unverified**.
+
+### Consumer continuation `0180:002054FE`: delayed-work dispatcher
+
+The 32-bit protected-mode sequence is:
+
+```text
+0x2054FE: ESI = dword [ESI]         // next list node
+0x205500: test ESI, ESI
+0x205502: if zero -> 0x205534     // return
+0x205504: decrement word [ESI+6]
+0x205508: if positive -> 0x2054FE // check next node
+0x20550A: EBP = dword [ESI+8]
+... copy dwords [ESI+C/10/14] into DS:[2B5A80/7C/78]
+0x20552E: EDI = dword [ESI+18]
+0x205531: JMP dword [ESI+1C]      // dispatch task callback
+```
+
+This is strong instruction-level evidence for a **linked-list
+delayed-task / callback dispatcher**: it visits successive nodes,
+decrements a 16-bit countdown at node+6, skips tasks whose
+countdown remains positive, and transfers control to a function
+pointer in node+1C on expiry. The list appears to start via
+`0x275B04` from the previously decoded consumer entry,
+but we have not traced all list-management functions.
+The indirect transfer is a **JMP**, not a CALL.
+
+Additional code beginning `0x205535` searches/relinks
+nodes, and code at `0x205565` begins setting up
+a collection with `ECX=0xA8`, although the 128-byte
+snapshot ends partway through that setup. The exact structure
+layout and function identities are not yet established.
+
+**Critical interpretation:** This is much better evidence for
+a *timer-driven scheduler* than for a directly measured
+**60-Hz fighter simulation update**. We have NOT confirmed
+the event timer's exact relationship to game logic,
+sprite animation, controls, collision or physics.
+
+### Next experiment should observe the actual indirect dispatches
+
+Collect the original **`*_signal_code.csv`** metadata to
+check `protected_mode`, `code_bits` and
+`ivt_irq0_segment:ivt_irq0_offset` against the producer.
+
+Then instrument the exact interpreted instruction
+`0180:00205531` as a **default-off diagnostic** during combat:
+
+- `PIC emulated time`, task node `ESI`, DS selector/base
+- `WORD DS:[ESI+6]` after decrement
+- `DWORD DS:[ESI+0x1C]` — actual callback destination
+- optional `EBP` / `EDI` task context, entry source and repetition
+
+Group callbacks by target EIP, count their recurrences and
+compare across active combat, menus and intermissions.
+Disassemble the callback sites **before** calling any one
+of them a simulation tick. The callback destination is
+DS-relative data; the resulting near jump uses the caller's CS
+and guest code-mode context.
+
+**Never modify the original executable, timer IRQ, PIT/VGA
+frequency, or original game assets while researching this.**
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research in GitHub fork `WildGer/dosbox-staging`, branch `mk2-timing-research`: read these findings, especially **Writer identified: MK2's work-ready flag is set at 09B0:08AF**, plus `docs/mk2-timing-research.md`. Earlier PIT0 ~60.052Hz, VGA ~70.09Hz, 3-1-1-2 visual pattern, 70,000/70,000 VGA RGB/cache line hash agreement. Private disassembly showed `0180:00205489` waits for DWORD DS:[ESI+0x24], ESI from DS:[0x27177C], and `0180:002054AD` clears this work-ready DWORD. **LATEST user-provided stdout** from `mk2_normal_40000_20261110_153111_signal.csv`: 12,329 rows, 6,108 direct `0 -> nonzero` stores by **CS 09B0, base 0x9B00, EIP 0x8AF**; 6,108 clears by `0180:002054AD`; median both 16.652ms ~60.05Hz; 102 independent bounded opcode samples also identify 09B0:08AF, not extra transitions. Watched linear target 0x9B24. Likely timer/interrupt-associated producer but still not confirmed as IRQ0 handler or 60Hz game-logic tick. New untested branch change: on first positive store, capture private **`*_signal_code.csv`** with 128-byte snippets at producer CS:EIP, 32 bytes before it, and MK2 consumer continuation 0180:2054FE; also record IVT IRQ0 vector, CPU mode and code segment 16/32 bit width. Updated `scripts/extract_mk2_guest_code.py` now chooses ndisasm -b16/-b32. Next: repeat runner after building latest branch, upload new `_signal_code.csv` or locally disassembled snippets/IRQ vector; establish producer ISR identity and actual downstream logic tick. Runner cleans `DOSBOX_MK2_TRACE` environment on exit; get output by actual path. Do NOT redistribute game code, alter PIT/VGA frequencies or assert simulator FPS without direct game-state evidence.
+> Continuing MK2 DOS timing research in `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read this findings file, especially **Three producer/consumer code snippets, actual x86 disassembly (2026-11-10)**. Previous PIT0 ~60.052Hz and VGA ~70.09Hz; image/copy pipeline investigated using six streams. Original MK2 guest CPU probe found protected-mode busy-wait `0180:00205489` with consumer clear `0180:002054AD`. Signal-watch CSV analyzer (user pasted stdout) found 6,108 positive writes at **09B0:08AF** and 6,108 clears at **0180:2054AD**, both median 16.652ms, target linear 0x9B24, plus 102 opcode-boundary confirmations of producer. Three 128-byte **private binary snapshots now uploaded and actually decoded**: `09B0:08AF` 16-bit x86 **INC WORD DS:[0024] / carry INC DS:[0026]** creates a 32-bit pending-work counter; `09B0:08B9` similarly increments a separate 32-bit counter DS:[0028..002B]. Code near 08A8 gates updates on DS:[003C]. Consumer code `0180:2054FE` is a **linked-node delayed-task dispatcher**: ESI=[ESI], decrement WORD [ESI+6], skip if positive, load per-task EBP/EDI and context, then **JMP DWORD [ESI+1C] at 0180:00205531**. This does NOT prove a 60Hz fighter simulation tick. Private `*_signal_code.csv` metadata containing IVT IRQ0 vector and true code size was not supplied (only .bin snippets), so direct IRQ0 handler relationship is not proven. Next: request _signal_code.csv metadata to check IVT and implement a guarded, temporary 0180:205531 callback dispatch logger (task, callback target, emulated time) in normal core, then disassemble the actual gameplay callbacks and validate state updates. DO NOT alter game binary or PIT/VGA clocks; do not commit game code bytes/disassembly to GitHub.
 
 **Raw CSVs are not in the repository.** Ask for the next `_signal.csv` if needed; don't infer unobserved rows.
