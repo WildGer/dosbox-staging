@@ -810,6 +810,58 @@ to produce short disassemblies, then **verify the loop logic and call
 relationships before adding a game-state tick counter**. No changes
 to PIT, VGA, IRQs, guest program or game assets are needed.
 
+## Guest code snapshot extraction confirmed (2026-11-10, 14:06 capture)
+
+The user successfully ran `scripts/extract_mk2_guest_code.py` on
+`mk2_normal_40000_20261110_140646_guest_code.csv` after fixing a
+PowerShell filename-construction error. The extractor reported
+**six local binary snippets, 64 bytes each**, with guest start EIPs:
+
+- `irq_wait_loop_00205489.bin`
+- `vga_3da_poll_002196D5.bin`
+- `vram_draw_42fc_002042FC.bin`
+- `periodic_c81e_0020C81E.bin`
+- `vram_draw_479a_0020479A.bin`
+- `vram_draw_461a_0020461A.bin`
+
+**This verifies extraction and snapshot availability only.** No
+instruction bytes or decoded disassembly have yet been presented in
+the chat. Do **not** infer particular instructions or logic tick
+behavior from file names. The local snippet CSV and binaries contain
+bytes from the user's legally owned MK2 installation, and are **not
+committed to GitHub**.
+
+Next: obtain a disassembly of these snippets, either by analyzing
+a privately supplied `_guest_code.csv` or locally running
+`ndisasm -b 32 -o 0x205489 <irq_wait_loop.bin>`,
+`ndisasm -b 32 -o 0x2196D5 <vga_3da_poll.bin>`, etc. The two
+highest-priority sites are the wait loop and the status-port read.
+A 64-byte snippet only shows a limited window; decoding at its start
+does not establish the full function call graph or simulation tick.
+After decoding, verify with branch control flow and (if needed)
+targeted further reads before instrumenting gameplay simulation.
+
+### PowerShell filename correction
+
+The original example using
+`[System.IO.Path]::ChangeExtension($env:DOSBOX_MK2_TRACE, $null)`
+left a trailing `.` in this PowerShell environment, yielding a wrong
+`._guest_code.csv` path. The working expression is:
+
+```powershell
+$codeCsv = $env:DOSBOX_MK2_TRACE -replace '\\.csv
+
+> Continue MK2 DOS timing investigation in repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, using this findings report and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz, recurring source-frame visual cadence 3-1-1-2. Six visual/VGA probes were validated and found 70,000 matching VGA-to-source-cache line hashes, and frames that can change because writes during scanout N are first read in N+1. Seventh guest-context probe captured `mk2_40000_20261110_133415_guest.csv` (dynamic/auto), and `mk2_normal_40000_20261110_134308_guest.csv` (normal). In normal, 6,963/7,076 pre-IRQ0 samples are in page `00205400`, distributed almost equally among exact `CS:EIP=0180:00205489/8F/92/94` (possible tight loop). All 1,531 3DAh sync rising and 5,402 sampled port reads show `0180:002196D5` (candidate polling instruction). VRAM first-write samples are concentrated in code pages `00204200–002049FF`. None of these has been demonstrated to be an MK2 simulation tick. **NEW untested branch change:** a small, one-time, 64-byte guest code snapshot probe for six known locations, saved LOCALLY to `*_guest_code.csv` when the ordinary `DOSBOX_MK2_TRACE` is enabled. Helper `scripts/extract_mk2_guest_code.py` writes local .bin snippets and prints ndisasm/objdump commands. Next: compile, run a short core=normal combat trace, inspect snapshot CSV, privately disassemble candidate code, verify actual loop/state changes before counting ticks. Do not put guest MK2 code bytes or assets in the repository or modify PIT/VGA/guest binary timing.
+
+**Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
+, '_guest_code.csv'
+Test-Path "$codeCsv"
+python scripts/extract_mk2_guest_code.py "$codeCsv"
+```
+
+The main instrumentation guide now uses `Split-Path -LeafBase`
+to avoid this trailing-dot issue.
+
 ## Context to restore in a new chat
 
 > Continue MK2 DOS timing investigation in repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, using this findings report and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz, recurring source-frame visual cadence 3-1-1-2. Six visual/VGA probes were validated and found 70,000 matching VGA-to-source-cache line hashes, and frames that can change because writes during scanout N are first read in N+1. Seventh guest-context probe captured `mk2_40000_20261110_133415_guest.csv` (dynamic/auto), and `mk2_normal_40000_20261110_134308_guest.csv` (normal). In normal, 6,963/7,076 pre-IRQ0 samples are in page `00205400`, distributed almost equally among exact `CS:EIP=0180:00205489/8F/92/94` (possible tight loop). All 1,531 3DAh sync rising and 5,402 sampled port reads show `0180:002196D5` (candidate polling instruction). VRAM first-write samples are concentrated in code pages `00204200–002049FF`. None of these has been demonstrated to be an MK2 simulation tick. **NEW untested branch change:** a small, one-time, 64-byte guest code snapshot probe for six known locations, saved LOCALLY to `*_guest_code.csv` when the ordinary `DOSBOX_MK2_TRACE` is enabled. Helper `scripts/extract_mk2_guest_code.py` writes local .bin snippets and prints ndisasm/objdump commands. Next: compile, run a short core=normal combat trace, inspect snapshot CSV, privately disassemble candidate code, verify actual loop/state changes before counting ticks. Do not put guest MK2 code bytes or assets in the repository or modify PIT/VGA/guest binary timing.
