@@ -377,6 +377,77 @@ Test it with a 40k-cycle fight of ~60–90 s and keep all **five** CSV files.
 See the [research log](mk2-timing-research-findings-2026-11-09.md) for the
 validation checklist and recorded findings.
 
+## NEW: sparse per-scanline source and renderer-cache comparison (`*_lines.csv`)
+
+The sixth opt-in CSV, e.g. `mk2_40000_20261110_XXXXXX_lines.csv`,
+collects **individual VGA scanline samples** in tightly scoped windows.
+This is the follow-up to the 2026-11-10 five-CSV finding: 696 visually
+different 320×200 frames had no observed VGA write or DAC RGB commit
+in the previous scanout interval and no sampled net VRAM/palette boundary
+changes. This result is **unexplained, not proven to be an emulation bug**.
+
+### Collection strategy and interpretation
+
+- Enabled through the **existing `DOSBOX_MK2_TRACE` variable**. There is no
+  new command-line option.
+- **Only** collect in Mode 13-style 320×200 VGA (the observed RGB source is
+  320×200×4 bytes); **only** during the 1-second emulated windows
+  **40–41, 60–61, 80–81, 100–101 and 120–121 seconds** after launch.
+  The first sampled frame within each window is a baseline. This limits
+  observer effects. Gameplay must overlap these windows for meaningful data.
+- Immediately before each VGA line conversion, record its emulated time,
+  actual `vga.draw.address`, masked video-memory offset, source kind
+  (`1=raw vga.mem.linear`, `2=vga.fastmem`, `3=other`), a fingerprint
+  of the 320 source-index bytes and a fingerprint of the **effective**
+  256-colour RGB palette.
+- Immediately after `VGA_DrawLine()`, fingerprint the 1280 bytes of its
+  32-bit RGB output **before** they enter `ReelMagic_RENDER_DrawLine` and
+  the software scaler.
+- After the complete, non-aborted scanout has been latched by the renderer,
+  hash the corresponding source-cache row and compare with the VGA line
+  output. Sampling rows are written to the CSV **after frame completion**,
+  never from inside individual line-event callbacks. No rendered image
+  pixels, original assets or MK2 EXE are exported.
+- All hashes are 64-bit FNV-1a fingerprints, suitable for comparing output,
+  not cryptographic integrity proofs.
+
+Columns:
+
+| Column | Meaning |
+|---|---|
+| `scanout_index` | Join key to `*_frames.csv` and `*_scanmem.csv` |
+| `line` | Source image row 0–199 |
+| `frame_begin_ms`, `line_sample_ms`, `frame_complete_ms` | Fractional emulated PIC timestamps |
+| `draw_address`, `masked_offset` | Video memory address requested by VGA and address masked into source |
+| `source_kind` | Actual raw-memory or fastmem pointer class |
+| `previous_valid` | Has another sampled frame of this line in the current window |
+| `source_changed` | Source-index bytes differ from the preceding sampled frame |
+| `palette_changed` | Effective RGB lookup differs from preceding sampled frame |
+| `output_changed` | VGA-produced RGB line differs from preceding sampled frame |
+| `cache_changed` | Renderer source-cache line differs from preceding sampled frame |
+| `output_equals_cache` | VGA RGB bytes match the retained pre-scaler source-cache row |
+| `source_hash`, `palette_hash`, `vga_output_hash`, `renderer_cache_hash` | Four hex fingerprints |
+
+**Important limitations:** The RGB palette hash covers **all** entries,
+including those unused by a specific line; a changed palette hash does not
+prove that visible pixels changed. The source hash captures **a row at the
+instant of the conversion**, not VRAM every CPU cycle. Writes that change
+and restore pixels before the sample can escape detection. A mismatch with
+the final renderer cache can be due to resizing, scan doubling, another
+renderer behaviour, or true source/cache discrepancy; do not assume a bug.
+The test is restricted to the observed MK2 graphics configuration and does
+not claim coverage of every DOS graphics mode. These source-cache rows
+are **not** equivalent to final GPU presentation timings.
+
+**Validation required:** This sixth probe has been committed and wired to
+the VGA scanout and renderer, but it has **not yet been built or exercised on
+the user's Windows machine**. Rebuild the current branch, run MK2 for at
+least 85 seconds to include the first three windows, then check
+`*_lines.csv` is non-empty, line indices stay in 0–199, and sampled
+`scanout_index` values appear in `*_frames.csv`. Collect all **six**
+CSV files together; compare `*_lines.csv` with matching `region_mask`
+and `_scanmem.csv` flags in the same frame, not across unrelated runs.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -388,6 +459,8 @@ validation checklist and recorded findings.
 - `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
 - `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
 - `src/hardware/mk2_scanmem_probe.h`: raw/fastmem and effective VGA palette boundary hashes, `_scanmem.csv`.
+- `src/hardware/mk2_scanline_probe.h`: sparse line-level source indices, effective palette, VGA RGB and renderer-cache row fingerprints, `_lines.csv`.
+- `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
 - `src/hardware/video/vga_attr.cpp`: attribute palette mapping and horizontal panning programming.
