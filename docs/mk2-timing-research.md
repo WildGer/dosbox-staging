@@ -1,5 +1,10 @@
 # MK2 DOS timing research (experimental)
 
+**Research log and handoff:** [MK2 timing findings (2026-11-09)](mk2-timing-research-findings-2026-11-09.md).
+This is the authoritative continuity document for observations, CSV filenames,
+uncertainties, current work, and how to resume after a chat reset.
+
+
 This fork includes **opt-in CSV telemetry** to investigate why
 *Mortal Kombat II* for MS-DOS appears less fluid than MK1/MK3.
 
@@ -335,6 +340,40 @@ VRAM writes and GPU/host presentation timing are not diagnosed by this probe.
 The register CSV identifies candidate causes, not proof of guest simulation
 rate or a unique rendering root cause.
 
+## NEW: scanout boundary memory/colour comparison (`*_scanmem.csv`)
+
+In addition to the four existing CSV streams, the branch now emits a **fifth**
+file named like `mk2_40000_20261109_XXXXXX_scanmem.csv`. It is **new and
+has not yet been built or runtime-tested on Windows**.
+
+It compares read-only fingerprints captured **at the start of scheduled
+scanline drawing and at completion of the same non-aborted scanout**:
+
+- `vga.mem.linear` — raw VGA backing memory, limited to the first 256 KiB.
+- `vga.fastmem` — accelerated VGA drawing buffer, first 128 KiB.
+- `vga.dac.palette_map` — current effective 256-entry RGB colour mapping.
+- The final source image `visible_hash` / `scanout_index` from
+  `*_frames.csv`, reused without calculating that expensive image hash again.
+
+The new CSV records whether each memory/palette state changed **within the
+scanout** (`*_changed_during`) and **between the preceding scanout's end and
+the current one's start** (`*_changed_between`). It records scanout geometry,
+actual source pointer class (raw/fastmem/other), selected `vga.mode`,
+display-start and panning, sample byte lengths, begin/end timestamps and
+fingerprints.
+
+**Caution:** whole-buffer hashes at just two instants do not identify when
+each line is fetched. Transient changes between snapshots or data outside
+these caps are invisible. An unchanged pair of boundary hashes cannot rule
+out transient writes or a scanline-mixed image. A changed hash may represent
+off-screen data rather than new visible pixels. Compare against
+`*_regs.csv`, `*_vram.csv`, and `*_frames.csv` before attributing a cause.
+The new sampler increases CPU work only when tracing is enabled.
+
+Test it with a 40k-cycle fight of ~60–90 s and keep all **five** CSV files.
+See the [research log](mk2-timing-research-findings-2026-11-09.md) for the
+validation checklist and recorded findings.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -345,6 +384,8 @@ rate or a unique rendering root cause.
 - `src/hardware/video/vga_memory.cpp`: per-write, read-only VGA page-handler callbacks and coverage mode.
 - `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
 - `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
+- `src/hardware/mk2_scanmem_probe.h`: raw/fastmem and effective VGA palette boundary hashes, `_scanmem.csv`.
+- `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
 - `src/hardware/video/vga_attr.cpp`: attribute palette mapping and horizontal panning programming.
 - `src/hardware/video/vga_dac.cpp`: DAC RGB entry commits and PEL-mask changes.
