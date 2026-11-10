@@ -20,7 +20,9 @@
 // Experimental MK2 signal probe: cheap default-off branch. The expensive
 // memory check runs only in brief windows armed after selected IRQ0 events.
 extern bool Mk2SignalInstructionActive;
+extern bool Mk2SignalWatchActive;
 void Mk2SignalOnInstructionBoundary();
+void Mk2SignalOnTaskDispatch();
 
 #if C_DEBUGGER
 #include "debugger/debugger.h"
@@ -140,6 +142,13 @@ Bits CPU_Core_Normal_Run() noexcept
 	while (CPU_Cycles-->0) {
 		if (Mk2SignalInstructionActive) {
 			Mk2SignalOnInstructionBoundary();
+		}
+		// Just one additional conditional in the default-disabled path;
+		// read the task node only at the independently decoded indirect
+		// near jump within MK2's protected-mode delayed-work dispatcher.
+		if (Mk2SignalWatchActive && cpu.pmode &&
+		    SegValue(cs) == 0x0180u && reg_eip == 0x00205531u) {
+			Mk2SignalOnTaskDispatch();
 		}
 		LOADIP;
 		core.opcode_index=cpu.code.big*0x200;
