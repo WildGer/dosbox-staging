@@ -1020,8 +1020,90 @@ Next controlled test should:
 **No PIT/VGA frequency, guest binaries or simulation timing were
 changed by this analysis.**
 
+## New controlled experiment: watch the producer of MK2's busy-wait signal
+
+**Implementation date:** 2026-11-10, branch `mk2-timing-research`.
+**Current status:** committed, integrated, **Windows compilation and runtime
+validation still pending**. No MK2 executable or copyrighted game bytes
+were changed or committed.
+
+### Why this experiment exists
+
+The user supplied six locally captured, 64-byte MK2 code snippets.
+Disassembly confirmed that `0180:00205489` loops reading a
+**DS-relative** DWORD at `[ESI+0x24]`, where ESI itself comes
+from `DS:[0x27177C]`. When nonzero, the consumer saves its value,
+updates `DS:[0x275B10]`, resets the watched DWORD and branches to
+`0x2054FE`. **We have not identified who writes the nonzero value.**
+That writer is a promising lead, but a producer event is not by itself
+proof that fighter animation or combat simulation advanced.
+
+### Technical implementation
+
+- `src/hardware/mk2_signal_probe.h`: new header-only,
+  **default-disabled** signal writer observer. It is constructed from
+  the pre-IRQ0 hook and becomes active only if
+  `DOSBOX_MK2_TRACE` is set and
+  `DOSBOX_MK2_SIGNAL_WATCH=1`. Requires the normal interpreter
+  `cpudecoder == CPU_Core_Normal_Run`.
+- `src/hardware/pic.cpp`: immediately before delivering IRQ0,
+  when interrupted CS:EIP lies in the confirmed loop
+  `0180:00205489–00205494`, capture the actual **DS selector/base**,
+  read `DS.base+0x27177C`, then calculate the runtime linear watch
+  address `DS.base + pointer + 0x24`. Also drains the event buffer
+  every emulated second.
+- `src/cpu/paging.h`: a cheap, guarded normal-core memory-write
+  hook on the standard byte/word/dword/qword inline write helpers.
+  Only stores overlapping the watched DWORD or its pointer-source
+  DWORD invoke the expensive callback; aligned stores are captured
+  once and cross-page stores via their byte components. Capture actual
+  before/after DWORD values, store address and width, guest writer
+  CS:EIP, writer DS selector/base and PIC emulated timestamp.
+  **Guest writes themselves are unchanged.**
+- `scripts/analyze_mk2_signal_trace.py`: standalone Python stdlib
+  tool to report writes, changes from zero to nonzero, clears, writer
+  CS:EIP concentration, pointer retargets and event spacing.
+
+The output `*_signal.csv` distinguishes `resolve`,
+`pointer_write`, `pointer_same`, `signal_write`,
+and `signal_same`. The sample interval is emulated 30–150 seconds.
+Note that the watch **starts after observing the consumer loop**,
+not from the moment MK2 starts. Segment changes, pointer changes
+between samples, direct memory access, host-originated operations or
+a dynamic CPU core may bypass the observed helper paths. A zero-event
+result therefore cannot establish that no signal writer exists.
+The write callback still introduces one branch into common guest
+memory write helpers, so compare trace-enabled/disabled CPU load.
+
+### Next Windows test
+
+```powershell
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+$env:VCPKG_ROOT = "C:\vcpkg"
+cmake --build --preset=release-windows --parallel 8
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$env:DOSBOX_MK2_SIGNAL_WATCH = "1"
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
+
+& "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
+
+$signalCsv = Join-Path (Split-Path $env:DOSBOX_MK2_TRACE -Parent) ((Split-Path $env:DOSBOX_MK2_TRACE -LeafBase) + "_signal.csv")
+Test-Path "$signalCsv"
+python scripts/analyze_mk2_signal_trace.py "$signalCsv"
+Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
+```
+
+Collect gameplay in the 30–150s emulated window, and upload
+`*_signal.csv` plus analyzer stdout. The existing `_guest.csv`
+may also help if unusual PC contexts are observed. Do not label a
+writer as the MK2 simulation tick until its code and the related
+actual game-state changes have been verified.
+
 ## Context to restore in a new chat
 
-> Continue MK2 DOS research in `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read `docs/mk2-timing-research-findings-2026-11-09.md` (especially **Six guest code snippets: confirmed x86 instruction analysis**) and `docs/mk2-timing-research.md`. Earlier: PIT0 ~60.052 Hz, VGA ~70.09 Hz, 3-1-1-2 visual intervals and 70,000/70,000 VGA source-cache line hash agreement; 837 changed images without later writes are consistent with writes during the preceding scanout. Normal-core CPU sampling confirmed busy-wait PCs 0x205489/8F/92/94 and VGA status poll PC 0x2196D5. **The user has now uploaded and we have actually disassembled six 64-byte x86 code snippets.** 0x205489 loads ESI from DS:[0x27177C], loops while DWORD DS:[ESI+0x24] == 0, and on nonzero saves the value to DS:[0x275B0C], updates DS:[0x275B10], clears DS:[ESI+0x24], then jumps to 0x2054FE (outside snippet). The producer of the pending value is unknown. 0x2196D5 waits via `in al,dx` / `test al,8` at VGA 0x3DA, then conditionally sets DAC palette entry 0 using ports 0x3C8/0x3C9 and a word at DS:[0x2B5CE8]. 0x2042FC, 0x20461A, 0x20479A are unrolled buffer compare/copy patterns; 0x20C81E is an unidentified byte-processing/table-lookup helper, not a demonstrated simulation tick. CS base was zero in traces, but **DS base was not captured**; don't assume listed DS offsets are linear addresses. Next: limited normal-core watchpoint with exact DS base and resolved dynamic address (DS:[ESI+0x24]), identify producer's guest CS:EIP, then inspect its control flow and the consumer continuation at 0x2054FE. Do not declare a game tick or change PIT/VGA timing before confirming actual game-state transitions. Private game code snippets are NOT uploaded to GitHub.
+> Current MK2 DOS timing research in `WildGer/dosbox-staging`, branch `mk2-timing-research`: review `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz, VGA ~70.09 Hz; six video telemetry streams validated, 70,000 VGA/cache line hashes match, most previously unexplained source images reflect VRAM writes during earlier scanouts. The seventh guest CPU trace in dynamic and normal cores found 0180:00205489/8F/92/94 as a tight wait and 0180:002196D5 as VGA 3DAh wait. Actual private disassembly of six code snippets confirmed 0x205489 loads a pointer from `DS:[0x27177C]`, spins while `DWORD DS:[ESI+0x24]==0`, and then saves/clears the value; the producer is UNKNOWN. CS base was zero in samples; DS base has NOT been measured and must be resolved dynamically. Latest change (NOT YET BUILT ON WINDOWS): opt-in normal-core writer watch in `src/hardware/mk2_signal_probe.h`, enabled with BOTH `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`, hooks standard normal-core guest stores through `src/cpu/paging.h`, resolves DS pointer on pre-IRQ0 in the wait-loop, logs producer CS:EIP, old/new value and PIC time to `_signal.csv` during emulated 30–150s. Analyzer `scripts/analyze_mk2_signal_trace.py`. Next: compile, run 60+ emulated seconds of active combat with `core=normal`, upload `_signal.csv` plus analyzer output; identify the producer and disassemble it before asserting any real MK2 simulation tick. No MK2 assets/code bytes in GitHub. Do not modify PIT/VGA or game's executable.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
