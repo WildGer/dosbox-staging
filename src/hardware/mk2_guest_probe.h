@@ -142,6 +142,8 @@ private:
         enabled = true;
     }
 
+    ~Mk2GuestProbe() { Flush(); }
+
     bool InWindow(const double emulated_ms) const
     {
         return enabled && emulated_ms >= WindowStartMs &&
