@@ -82,13 +82,15 @@ public:
     // watched target. Cross-page writes will be observed as byte writes.
     bool BeforeGuestStore(const PhysPt address, const uint8_t size)
     {
-        if (!resolved || !IsNormalCore() || !cpu.pmode ||
-            size == 0 || !InWindow(PIC_FullIndex())) {
+        if (!resolved || !IsNormalCore() || !cpu.pmode || size == 0) {
             return false;
         }
+        // Extremely cheap address comparison first; do not calculate
+        // PIC_FullIndex() for the millions of unrelated guest writes.
         const bool touches_target = Overlaps(address, size, target_linear);
         const bool touches_pointer = Overlaps(address, size, pointer_location);
-        if (!touches_target && !touches_pointer) {
+        if ((!touches_target && !touches_pointer) ||
+            !InWindow(PIC_FullIndex())) {
             return false;
         }
 
