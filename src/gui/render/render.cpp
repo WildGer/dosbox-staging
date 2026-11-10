@@ -25,6 +25,7 @@
 #include "gui/render/render_backend.h"
 #include "hardware/pic.h"
 #include "hardware/mk2_vram_probe.h"
+#include "hardware/mk2_vga_regs_probe.h"
 #include "hardware/video/vga.h"
 #include "misc/notifications.h"
 #include "misc/support.h"
@@ -410,9 +411,16 @@ void RENDER_EndUpdate(const bool abort)
 		// repaints, which are not new game frames.
 		if (DOSBOX_IsRunning()) {
 			const auto& source = render.last_complete_source;
-			Mk2VramProbe::Get().OnCompletedScanout(PIC_FullIndex());
+			const auto scanout_timestamp = PIC_FullIndex();
+			Mk2VramProbe::Get().OnCompletedScanout(scanout_timestamp);
+			Mk2VgaRegsProbe::Get().OnCompletedScanout(
+			        scanout_timestamp,
+			        vga.config.display_start,
+			        vga.config.real_start,
+			        vga.config.pel_panning,
+			        vga.draw.panning);
 			Mk2FrameProbe::Get().OnCompletedScanout(
-			        PIC_FullIndex(),
+			        scanout_timestamp,
 			        reinterpret_cast<const uint8_t*>(source.cache.data()),
 			        source.src.width,
 			        source.src.height,
