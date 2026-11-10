@@ -748,6 +748,72 @@ Keep `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`,
 `_signal.csv`. Share the CSV and analyzer output, especially
 `opcode_transition` and any positive `signal_write` PCs.
 
+### Confirmed producer, 2026-11-10 15:31: **09B0:08AF**
+
+The next Windows run successfully identified **6,108 positive
+signal writes** to watched linear address `0x9B24`, all from
+**CS 09B0, CS base 0x9B00, EIP 0x8AF**.
+The known protected-mode consumer at `0180:002054AD`
+performed **6,108 corresponding clears**. Both had
+median spacing **16.652 ms**, compatible with
+~60.052 Hz PIT0. The independent bounded opcode trace
+confirmed the same 09B0:08AF source **102 times**; those
+are duplicate observations, **not additional activations**.
+
+**Interpretation:** the code at `09B0:08AF` is very likely
+timer/interrupt-associated, but a timer's event frequency does
+not establish the combat simulation update cadence. We must
+inspect the actual producer instructions and confirm whether
+it is IRQ0-linked.
+
+**NEW opt-in code capture (not yet compiled on Windows):**
+`src/hardware/mk2_signal_probe.h` now creates
+`*_signal_code.csv` after the **first observed positive store**.
+It contains at most three 128-byte private snapshots:
+
+- `producer_at_write`: begins exactly at the writer EIP,
+  expected `09B0:08AF`.
+- `producer_preceding_32`: begins 32 bytes before that EIP,
+  useful for surrounding branches/calls, **may start inside
+  an instruction**.
+- `consumer_after_wait_2054FE`: protected-mode code at
+  `0180:002054FE`, following the wait/clear sequence.
+
+CSV also includes the current `protected_mode`,
+**`code_bits`** from the producer's actual code-segment
+operand size (16 or 32) and the IVT's **IRQ0 segment/offset**
+read from guest low memory 0x20/0x22. The existing
+`scripts/extract_mk2_guest_code.py` now selects
+`ndisasm -b 16` or `-b 32` according to this field.
+
+**Do not decode the producer as 32-bit merely because MK2's main
+protected-mode loop is 32-bit.** The writer is located in a
+different segment and may use 16-bit instructions.
+
+### Extract after rebuilding and repeating the signal-watch run
+
+```powershell
+# Run after the new capture is closed. No dependency on
+# DOSBOX_MK2_TRACE, which the PowerShell runner clears on exit.
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_signal_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $latest) {
+    Write-Host "No _signal_code.csv found: rebuild and rerun the updated probe."
+} else {
+    python scripts/extract_mk2_guest_code.py "$($latest.FullName)"
+}
+```
+
+Keep the `*_signal_code.csv` and extracted `.bin` files
+private; they contain short snippets from the user's own MK2
+memory, and **must not be committed to GitHub**.
+A vector pointing to the producer's segment supports a timer-
+handler hypothesis, but instruction-level disassembly and
+call-chain tracing are still needed to establish what function
+actually advances game logic.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
