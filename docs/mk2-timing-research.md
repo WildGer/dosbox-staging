@@ -267,6 +267,74 @@ For each recurring 3-1-1-2 sequence in `*_frames.csv`, align
 This instrumentation cannot by itself determine the game's simulation
 update rate; that would require targeted guest-side hook points.
 
+## VGA display registers / palette event timeline (`*_regs.csv`)
+
+A fourth opt-in file is generated alongside the PIT/VGA, visual-frame and
+VRAM-write traces: `mk2_40000_<timestamp>_regs.csv`.
+
+Unlike the 1 ms-aggregated VRAM-write CSV, this file contains **individual
+register-related events with fractional PIC emulated-millisecond timestamps**.
+The timing source is the same as `*_frames.csv` and `*_vram.csv`.
+
+Each event includes one or more of the programmed or latched values below:
+
+| Event (`event`) | Meaning |
+|---|---|
+| `crtc_start_write` | A write to CRTC index 0Ch or 0Dh, including the combined programmed start address |
+| `start_latch` | VGA applies the programmed display-start address (`real_start`) on a scheduled display-start latch event |
+| `pel_pan_write` | Attribute register 13h programs horizontal pixel panning |
+| `pan_latch` | VGA applies the programmed horizontal pixel panning to the draw state |
+| `dac_rgb_commit` | The third DAC component byte (port 3C9h) completes a 6-bit R/G/B palette entry, before index increment |
+| `dac_mask_write` | Port 3C6h changed the PEL mask |
+| `attr_palette_map` | A 16-colour attribute palette entry was mapped to a DAC index |
+| `vga_refresh` | VGA refresh callback, with snapshot of programmed and latched state |
+| `scanout_complete` | Completed source image, with snapshot of programmed and latched state |
+
+Columns:
+
+- `event_index`: monotonically increasing sequence number, useful for
+  preserving ordering when multiple events share the same timestamp.
+- `emulated_ms`: fractional PIC clock timestamp in milliseconds.
+- `register`, `value`: written register/index and raw value when relevant;
+  negative one (`-1`) represents an unused field.
+- `display_start_programmed`: current `vga.config.display_start`.
+- `display_start_latched`: current `vga.config.real_start`; this may
+  lag the programmed address until a scheduled VGA latch event.
+- `panning_programmed`: current `vga.config.pel_panning`.
+- `panning_latched`: current `vga.draw.panning`.
+- `dac_index`, `dac_red6`, `dac_green6`, `dac_blue6`: the selected DAC
+  entry and its component values (6-bit components, 0–63). An attribute
+  palette mapping event reports only the destination DAC index.
+
+The events are gathered only with `DOSBOX_MK2_TRACE` enabled; otherwise the
+probe does no logging. Entries are buffered and flushed every 256 events,
+not on every individual I/O write. The trace records programmed values
+*after* existing DOSBox register logic runs, without altering it.
+
+### Correlating the traces
+
+For a changed image in `*_frames.csv`:
+
+1. Find the corresponding `scanout_complete` by timestamp in
+   `*_regs.csv`. Check whether the latched display start or panning differs
+   from the previous completed scanout.
+2. Inspect nearby `crtc_start_write` or `pel_pan_write` events and their
+   later `start_latch` / `pan_latch` application.
+3. Check `dac_rgb_commit`, `dac_mask_write` and
+   `attr_palette_map` in the same interval. A palette update may change the
+   visible RGB output without a corresponding page-handler VRAM write.
+4. Compare those events against write bursts in `*_vram.csv` and the
+   `region_mask` in `*_frames.csv`, using emulated timestamps throughout.
+
+**Interpretation limits:** A DAC entry programmed to its previous RGB value
+is still logged as a commit; likewise, re-writing an unchanged CRTC value
+is logged. A change of a register that affects an unused palette entry may
+not alter visible pixels. Display-start and panning are not the only ways
+to alter VGA presentation. Per-scanline changes, uncovered direct-mapped
+VRAM writes and GPU/host presentation timing are not diagnosed by this probe.
+The register CSV identifies candidate causes, not proof of guest simulation
+rate or a unique rendering root cause.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -276,6 +344,10 @@ update rate; that would require targeted guest-side hook points.
 - `src/hardware/mk2_timing_probe.h`: low-overhead counters and CSV writer.
 - `src/hardware/video/vga_memory.cpp`: per-write, read-only VGA page-handler callbacks and coverage mode.
 - `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
+- `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
+- `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
+- `src/hardware/video/vga_attr.cpp`: attribute palette mapping and horizontal panning programming.
+- `src/hardware/video/vga_dac.cpp`: DAC RGB entry commits and PEL-mask changes.
 - `src/gui/render/render.cpp`: completed source-frame sampling after source latch.
 - `src/gui/render/mk2_frame_probe.h`: frame and visible-palette fingerprints, per-scanout CSV.
 
@@ -286,7 +358,7 @@ early DOS prompt rows as MK2 gameplay measurements.
 ## Validation and limits
 
 The PIT/VGA CSV implementation was previously built and exercised by the user
-on Windows. **The newly added VGA write probe has not yet been compiled or
+on Windows. **The newly added VGA register probe has not yet been compiled or
 runtime-validated on the user's Windows machine.**
 
 Time-counter overhead is minimized by counting in hot paths and writing once
