@@ -5,7 +5,7 @@
 **Working platform:** Windows 11, Visual Studio 2026 (CMake `release-windows` preset), ClangCL, vcpkg at `C:\vcpkg`
 **Research date:** 2026-11-09
 **Game:** GOG installation of *Mortal Kombat II*, launched as an external DOS .EXE.
-**Status (updated 2026-11-10):** All **six CSV probes** have been built and exercised successfully in Windows. The sixth, sparse per-scanline probe, produced 70,000 verified line comparisons. Every sampled VGA RGB line hash equals its latched renderer source-cache counterpart. In the NEW 2026-11-10 trace, 837 changed source images without contemporaneous observed VRAM writes or DAC commits have a strong, consistent precursor: the *preceding scanout* included observable VRAM changes and VGA writes. In targeted windows, 32/32 such cases have changed source indices at line-read time. This supports next-scanout visibility of earlier VRAM updates, not a renderer-cache fault. Simulation tick cadence remains unmeasured.
+**Status (updated 2026-11-10):** Six CSV probes have been compiled and runtime-validated on Windows; the sixth scanline probe captured 70,000 lines and confirmed 70,000 matching VGA vs renderer-cache hashes. The next task—locating MK2 guest game-loop code—now has a **seventh** opt-in `_guest.csv` execution-context sampler committed to the branch, **pending Windows compilation and test**. No direct simulation-tick measurement has yet been made.
 
 ## Scope and non-negotiable constraints
 
@@ -535,8 +535,74 @@ scanout*, but not yet visible in its earlier-rendered lines.
 - Continue comparing tracer-on and tracer-off host performance to
   quantify measurement overhead.
 
+## Seventh stage: guest execution-context candidate discovery (2026-11-10)
+
+**Status: implemented on `mk2-timing-research`, not yet compiled or
+runtime-tested on Windows.** The six existing trace streams remain in
+place. No change to the original MK2 executable, video clocks, PIT or
+guest memory has been made.
+
+Our six-stream capture `mk2_40000_20261110_131108` closed a substantial
+graphics-side question: 70,000 / 70,000 VGA RGB line hashes matched their
+latched source-cache counterparts. The 837 changed images with no observed
+VRAM write/DAC commit since their previous completion all followed VRAM
+changes during the **preceding** scanout. 32 / 32 directly sampled cases
+showed changes in the source indices at line-read time. These observations
+do not identify MK2's **simulation tick** or fighter animation update rate.
+
+The next stage adds the new opt-in `_guest.csv` stream. It collects saved
+guest CPU registers and segmented `CS:EIP` context at five event types:
+(1) just before IRQ0 delivery, (2) the first intercepted VRAM write in
+each 1-ms bucket, (3) VSYNC-low-to-high reads of VGA status port 3DAh,
+(4) every 2048th port 3DAh read, and (5) independent 10-ms scheduler
+samples. Sampling is restricted to **30–150s emulated time**. The
+seventh probe uses a fixed-size memory buffer and batches CSV writes,
+so it avoids file I/O in video/CPU hot callbacks.
+
+Files implemented/changed:
+
+- `src/hardware/mk2_guest_probe.h` — new guest context sampler and CSV
+  writer; output columns include `event`, emulated timestamp, CS selector,
+  CS base, EIP, mode/CPL, VGA status and EAX/EBX/ECX/EDX/ESI/EDI/EBP/ESP.
+- `src/hardware/pic.cpp` — sample interrupted code immediately before
+  IRQ0 delivery, plus 10-ms scheduler samples.
+- `src/hardware/mk2_vram_probe.h` — sample context on first VGA page
+  handler write in a millisecond bucket.
+- `src/hardware/video/vga_misc.cpp` — sparse sampling of 3DAh polling
+  sites, reusing an existing emulated timestamp.
+- `scripts/analyze_mk2_guest_trace.py` — stdlib Python summary of
+  frequently sampled segmented code addresses by event class.
+
+**These observations are NOT simulation-tick counters.** `CS:EIP` inside
+an emulator callback may be imprecise/stale under a dynamic CPU core. IRQ0
+pre-dispatch is *interrupted* code, not the interrupt handler's entry.
+Polling/VRAM write sites may be in loops or copy routines rather than
+game-state updates. A 60-Hz IRQ rate or recurring hot address cannot
+establish simulation speed without identifying MK2 code and verifying
+specific state transitions.
+
+### Required next step
+
+1. Build latest `mk2-timing-research` on Windows with the existing
+   `release-windows` preset and local vcpkg root.
+2. Run MK2 at 40,000 cycles at least **160 emulated seconds**, preferably
+   with live combat in the 30–150s window, including some static moments.
+3. Collect **seven** CSV files (base, `_frames`, `_vram`, `_regs`,
+   `_scanmem`, `_lines`, and **`_guest`**) plus the launch log.
+   The file `_lines.csv` still only samples seconds 40,60,80,100,120.
+4. Run
+   `python scripts/analyze_mk2_guest_trace.py "<path-to-_guest.csv>"`
+   and attach the textual output with the seven CSVs.
+5. Identify candidate code locations by overlap of VRAM drawing,
+   recurring 3DAh polling, IRQ preemption and independent 10-ms samples.
+   Separate real-mode DOS startup from protected-mode gameplay.
+6. **Only after disassembly or a targeted watchpoint confirms a genuine
+   guest logic-update site**, consider a narrowly scoped counter at that
+   site and compare logic tick intervals against PIT, VRAM, image changes,
+   and input response timing. Do not alter timing to force desired FPS.
+
 ## Context to restore in a new chat
 
-> Research project: DOSBox Staging MK2 DOS visual timing (private GOG install), repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read this findings log (especially **Follow-up capture 2026-11-10 — six-stream line-level results**) and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz (divisor 19869), VGA ~70.09 Hz. The recurring 3-1-1-2 spacing between source-image changes occurs at 20k/40k/80k cycles. SIX opt-in CSV streams are now built and Windows-validated. Last capture: `mk2_40000_20261110_131108`, 163 seconds, 11,434 scanouts, 4,206 changed images, 10,985 graphics scanouts, 4,175 graphics changes. The `_lines.csv` captured 350 frames (70 per one-second window at 40,60,80,100,120s) and 70,000 scanlines. Every VGA-generated RGB line hash matched the latched renderer-cache line hash. All 14,259 changed lines out of 69,000 comparable line rows had changed source pixel indices and/or effective palette; ZERO unexplained output line changes. Of 4,175 changed graphics frames, 837 showed no observed VRAM writes/DAC commits since previous completion and no net boundary changes, but **all 837** immediately followed an earlier scanout with observed VRAM changes during drawing and writes in that prior interval. 32 of those 837 were line-sampled, and **32/32** showed source pixel index line changes without palette changes. Best working interpretation: VGA may draw some lines before an in-scanout guest VRAM write and show the new pixels on scanout N+1 without new writes after N completes. This is not evidence of a broken renderer cache or an established emulator defect. Do NOT change PIT/VGA clocks yet. Next worthwhile task: targeted guest simulation tick instrumentation or cross-check against reference/hardware, and trace-on/off performance controls. No game executable/assets distributed; raw CSVs live outside the repo.
+> Research project: DOSBox Staging MK2 DOS timing, repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. First read this document (especially the sections on the six-stream scanline analysis and the seventh-stage guest code discovery) and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz; image change interval pattern 3-1-1-2 recurs at 20k/40k/80k CPU cycles. Six opt-in CSV probes are Windows-validated; last six-CSV capture `mk2_40000_20261110_131108` had 11,434 source scanouts and 70,000 sampled scanlines. Every VGA-generated RGB sampled line matched the source cache. Of 837 changed graphics frames without recent VRAM write or DAC commit, all followed a scanout with VRAM writes during drawing, and 32/32 directly line-sampled cases changed source indices. This supports ordinary next-scanout visibility, NOT a proven renderer bug. The new seventh `_guest.csv` probe on branch is NOT YET Windows-tested: captures guest CS:EIP+CPU registers before IRQ0, at first VRAM write per ms, sparse VGA status polling, and 10-ms scheduler ticks during emulated seconds 30–150. Offline helper: `scripts/analyze_mk2_guest_trace.py`. These are code candidates, NOT real simulation ticks; guest EIP can be imprecise under dynamic core. Next: build, run 160+ sec at 40k, upload seven CSVs and launch log, locate candidate MK2 game-loop code then confirm with disassembly/targeted watchpoint. Preserve PIT/IRQ/VGA timings, original gameplay and private GOG assets; no original game files in repo.
 
-**Do not assume the source CSVs are in the repository.** If necessary, upload the previous five CSVs again, or preferably all six from the next run. Maintain this document when new evidence changes a hypothesis.
+**Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
