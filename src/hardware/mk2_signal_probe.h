@@ -142,6 +142,12 @@ public:
         const auto location = copy.pointer_write ? pointer_location
                                                  : target_linear;
         const auto after = mem_readd<MemOpMode::SkipBreakpoints>(location);
+        // Keep one small, read-only snapshot of the real producer and
+        // consumer continuation after the FIRST observed activation.
+        if (!copy.pointer_write && copy.before == 0 && after != 0) {
+            CaptureProducerCode(copy);
+        }
+
         if (after != copy.before) {
             Append(copy.pointer_write ? "pointer_write" : "signal_write",
                    copy.emulated_ms,
@@ -237,6 +243,7 @@ public:
     {
         if (enabled && ms % 1000u == 0) {
             Flush();
+            FlushCode();
         }
     }
 
@@ -246,6 +253,23 @@ private:
     static constexpr double StartMs = 30000.0;
     static constexpr double EndMs = 150000.0;
     static constexpr std::size_t BufferCount = 512;
+    static constexpr std::size_t CodeBytes = 128;
+    static constexpr std::size_t CodeSiteCount = 3;
+
+    struct CodeSnapshot {
+        const char* site = "";
+        bool captured = false;
+        bool written = false;
+        double emulated_ms = 0.0;
+        uint16_t cs = 0;
+        uint32_t cs_base = 0;
+        uint32_t observed_eip = 0;
+        uint32_t start_eip = 0;
+        uint16_t irq0_vector_segment = 0;
+        uint16_t irq0_vector_offset = 0;
+        uint8_t protected_mode = 0;
+        std::array<uint8_t, CodeBytes> bytes = {};
+    };
 
     struct Entry {
         const char* event = "";
@@ -308,6 +332,18 @@ private:
                   "target_linear,store_linear,store_size,before,after,"
                   "writer_cs,writer_cs_base,writer_eip,writer_ds,"
                   "writer_ds_base\n";
+        const auto code_path = trace.substr(0, cut) + "_signal_code" +
+                               (cut < trace.size() ? trace.substr(cut)
+                                                  : ".csv");
+        code_output.open(code_path, std::ios::out | std::ios::trunc);
+        if (code_output.is_open()) {
+            // First seven columns intentionally match the existing
+            // scripts/extract_mk2_guest_code.py format.
+            code_output << "site,emulated_ms,cs,cs_base,observed_eip,"
+                           "snapshot_start,bytes_hex,protected_mode,"
+                           "ivt_irq0_segment,ivt_irq0_offset\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -317,6 +353,94 @@ private:
         Mk2SignalInstructionActive = false;
         Mk2SignalWatchActive = false;
         Flush();
+        FlushCode();
+    }
+
+    // The source at 09B0:08AF has now been observed through both
+    // normal guest write helpers and independent opcode-boundary
+    // sampling. Copy tiny snippets from the running user's guest RAM
+    // once; never include game code bytes in this repository.
+    void CaptureSite(const std::size_t index, const char* label,
+                     const Pending& producer, const uint16_t selector,
+                     const uint32_t base, const uint32_t observed_eip,
+                     const uint32_t start_eip)
+    {
+        auto& snapshot = code_snapshots[index];
+        const uint64_t start = static_cast<uint64_t>(base) + start_eip;
+        if (snapshot.captured || start >
+                static_cast<uint64_t>(std::numeric_limits<PhysPt>::max()) -
+                        CodeBytes) {
+            return;
+        }
+        snapshot.site = label;
+        snapshot.emulated_ms = producer.emulated_ms;
+        snapshot.cs = selector;
+        snapshot.cs_base = base;
+        snapshot.observed_eip = observed_eip;
+        snapshot.start_eip = start_eip;
+        snapshot.protected_mode = static_cast<uint8_t>(cpu.pmode);
+        snapshot.irq0_vector_offset =
+                mem_readw<MemOpMode::SkipBreakpoints>(0x20u);
+        snapshot.irq0_vector_segment =
+                mem_readw<MemOpMode::SkipBreakpoints>(0x22u);
+        for (std::size_t i = 0; i < CodeBytes; ++i) {
+            snapshot.bytes[i] = mem_readb<MemOpMode::SkipBreakpoints>(
+                    static_cast<PhysPt>(start + i));
+        }
+        snapshot.captured = true;
+    }
+
+    void CaptureProducerCode(const Pending& producer)
+    {
+        if (!code_output.is_open() || code_snapshots[0].captured) {
+            return;
+        }
+        CaptureSite(0, "producer_at_write",
+                    producer, producer.cs, producer.cs_base,
+                    producer.eip, producer.eip);
+        // The preceding 32 bytes provide branch/call context. The
+        // first byte may NOT be an instruction boundary; do not
+        // blindly trust a disassembly starting from this offset.
+        if (producer.eip >= 32u) {
+            CaptureSite(1, "producer_preceding_32",
+                        producer, producer.cs, producer.cs_base,
+                        producer.eip, producer.eip - 32u);
+        }
+        // Separate protected-mode continuation after the consumer
+        // clears its work-ready flag. Independent of the producer CS.
+        CaptureSite(2, "consumer_after_wait_2054FE",
+                    producer, 0x0180u, 0u,
+                    0x002054feu, 0x002054feu);
+    }
+
+    void FlushCode()
+    {
+        if (!code_output.is_open()) {
+            return;
+        }
+        for (auto& snapshot : code_snapshots) {
+            if (!snapshot.captured || snapshot.written) {
+                continue;
+            }
+            code_output << snapshot.site << ','
+                        << std::fixed << std::setprecision(6)
+                        << snapshot.emulated_ms << ','
+                        << snapshot.cs << ','
+                        << snapshot.cs_base << ','
+                        << snapshot.observed_eip << ','
+                        << snapshot.start_eip << ','
+                        << std::hex << std::setfill('0');
+            for (const auto byte : snapshot.bytes) {
+                code_output << std::setw(2)
+                            << static_cast<unsigned>(byte);
+            }
+            code_output << std::dec << std::setfill(' ')
+                        << ',' << static_cast<unsigned>(snapshot.protected_mode)
+                        << ',' << snapshot.irq0_vector_segment
+                        << ',' << snapshot.irq0_vector_offset << '\n';
+            snapshot.written = true;
+        }
+        code_output.flush();
     }
 
     bool IsNormalCore() const
@@ -417,7 +541,9 @@ private:
     uint64_t event_count = 0;
     Pending pending = {};
     std::ofstream output = {};
+    std::ofstream code_output = {};
     std::array<Entry, BufferCount> buffer = {};
+    std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
 };
 
 #endif // DOSBOX_MK2_SIGNAL_PROBE_H
