@@ -463,6 +463,85 @@ first three windows, and collect all **six CSV files from the same run**.
 Compare sampled `scanout_index` with `_frames.csv` `region_mask`
 and `_scanmem.csv` data, not with unrelated sessions.
 
+## NEW: guest execution-context sampling (`*_guest.csv`)
+
+This is a **discovery step toward measuring MK2's actual game simulation
+ticks**, **not yet a simulation tick counter**. The previous six probes
+characterized PIT (60.052 Hz), VGA (70.09 Hz), drawing bursts, the DAC,
+completed source images and individual scanlines. They cannot identify the
+program code that advances fighter positions, physics, input processing or
+animation state.
+
+The seventh probe observes the **guest CPU context** at meaningful events,
+without patching the guest EXE, overriding CPU scheduling or changing video
+timing. When `DOSBOX_MK2_TRACE` is enabled it creates a new file
+`mk2_40000_<timestamp>_guest.csv` in addition to the six existing CSVs.
+
+**Collection range:** emulated time **30 to 150 seconds** after launch.
+Outside this range, no context rows are captured. Sampling is deliberately
+limited rather than tracing every guest instruction:
+
+| Event name | What is actually sampled |
+|---|---|
+| `irq0_pre` | CPU state immediately **before** DOSBox delivers the IRQ0 interrupt; this is **not** the IRQ handler entry |
+| `vram_first_write_ms` | CPU state at the first *observed VGA page-handler write* in a 1-ms bucket, **not** the first write instruction of a frame |
+| `vga_status_rising` | CPU state on a 3DAh read when the returned vertical-sync bit changes low→high |
+| `vga_status_sample` | CPU state every 2048th 3DAh read |
+| `clock_10ms` | Scheduler CPU-state sample every 10 emulated milliseconds, independent of graphics events |
+
+A fixed-size internal buffer holds records and flushes in batches at the
+emulated-second boundary (or when filled), rather than writing from the hot
+IRQ, I/O and VRAM handlers. An exit-time flush preserves the last partial
+batch. Because polling and writes are hot paths, the trace still has
+observer overhead; run a no-trace control before trusting host timings.
+
+The CSV exposes `sample_index`, `emulated_ms`, `event`, `cs`,
+`cs_base`, `eip`, `linear_cs_eip`, `protected_mode`, `cpl`,
+`vga_status`, and guest `EAX/EBX/ECX/EDX/ESI/EDI/EBP/ESP`.
+
+**Critical limitations:**
+
+- Under a **dynamic CPU core**, the saved `EIP` visible in a hardware or
+  video callback may refer to a translation-block boundary rather than
+  the exact triggering instruction. Even in the normal core, the callback
+  may see a pre-instruction address or another nearby location. Treat all
+  code addresses as **candidates to validate**, not exact source sites.
+- The interrupted `CS:EIP` before IRQ0 is **not** an ISR-entry address,
+  and seeing ~60 such events per second **does not prove** MK2's simulation
+  advances 60 times per second.
+- Status polling hotspots identify waiting loops; VRAM write hotspots
+  identify rendering/memory copy routines. These can help locate a game
+  loop but are not themselves logic ticks.
+- `linear_cs_eip` uses the current CS segment base plus saved EIP. Keep
+  CS selector, CS base and mode with an address when investigating a DOS
+  protected-mode extender; a raw physical address alone is insufficient.
+- No code breakpoints, instruction counting, guest-memory-state watches,
+  modifications to MK2 or simulation-rate claims are made at this stage.
+
+### Offline candidate discovery
+
+A small **standard-library-only Python script** is provided:
+
+```powershell
+python scripts/analyze_mk2_guest_trace.py "$env:USERPROFILE\Documents\MK2Timing\mk2_40000_<timestamp>_guest.csv"
+```
+
+It reports the most frequent guest `CS:EIP` and clustered address
+windows **separately by event type**, with sample count and time spacing.
+It deliberately does **not** label hot locations as game simulation
+updates. A later, targeted experiment must confirm a routine with guest
+disassembly or direct state advancement before counting its calls.
+
+**Validation required:** The guest probe is integrated into IRQ0, VRAM
+write-bucket entry, VGA 3DAh reads and the scheduler, but **has not yet
+been compiled or run on Windows**. Build and play **at least 150
+emulated seconds** (preferably 160+) at 40,000 cycles to capture the full
+30–150s window. Collect all seven CSVs and the launch log. First verify
+non-empty `_guest.csv`, recognizable `CS:EIP` clusters, and timestamps
+inside the window. Then evaluate whether the sampled locations are stable
+across gameplay versus menus and whether candidate locations correlate
+with meaningful game-state changes.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -475,6 +554,8 @@ and `_scanmem.csv` data, not with unrelated sessions.
 - `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
 - `src/hardware/mk2_scanmem_probe.h`: raw/fastmem and effective VGA palette boundary hashes, `_scanmem.csv`.
 - `src/hardware/mk2_scanline_probe.h`: sparse line-level source indices, effective palette, VGA RGB and renderer-cache row fingerprints, `_lines.csv`.
+- `src/hardware/mk2_guest_probe.h`: opt-in CPU register/CS:EIP samples at IRQ0, VGA status reads, write-burst starts and scheduler ticks (`_guest.csv`).
+- `scripts/analyze_mk2_guest_trace.py`: offline code-location clustering and event summaries (Python standard library only).
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
