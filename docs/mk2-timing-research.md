@@ -567,34 +567,32 @@ tick counter.
 
 ## Local guest instruction snapshot (`*_guest_code.csv`)
 
-After comparing `core=auto`/dynamic and `core=normal`, the candidate
-sites are stable enough for **limited private instruction disassembly**.
-The 2026-11-10 normal-core sample found **6,963 / 7,076** pre-IRQ0
-contexts at one 256-byte region, divided among `00205489`,
-`0020548F`, `00205492`, `00205494`, and all **6,933**
-3DAh sample/rising events at `002196D5`. This strongly favours
-short wait/poll sites, but is **not yet a game logic tick counter**.
+After validating the sampled CPU locations in both `core=dynamic`
+and `core=normal`, the next experiment is to **inspect a small amount of
+actual guest machine code**. The 2026-11-10 normal-core run had
+6,963 / 7,076 IRQ0-pre-dispatch samples in the 002054xx page, equally
+distributed over EIP 00205489/8F/92/94. Every one of 6,933 sampled
+3DAh status port reads used EIP 002196D5. These are **candidate
+wait/poll routines, not identified game logic ticks**.
 
-The new companion output `*_guest_code.csv` takes **one 64-byte
-read-only snapshot per matched guest code site** in protected mode
-(`CS=0180h`, `CS base=0`). It uses the existing guest sampling
-events, *not* a per-instruction core hook. Each snapshot is taken once,
-buffered and flushed periodically, so this adds negligible sampling
-volume. There is no new configuration variable.
+The updated `src/hardware/mk2_guest_probe.h` captures **at most
+one 64-byte read-only memory snippet at each of six confirmed code sites**,
+when the existing `DOSBOX_MK2_TRACE` variable is enabled.
+No per-instruction hook is involved. The separate local
+`*_guest_code.csv` contains a few memory bytes at
+`0180:00205489`, `0180:002196D5`, `0180:0020479A`,
+`0180:0020461A`, `0180:002042FC` and
+`0180:0020C81E` when the relevant event actually occurs.
+A row can be absent if the guest never reaches that PC while sampled.
+The CSV has `site,emulated_ms,cs,cs_base,observed_eip,
+snapshot_start,bytes_hex` fields.
 
-The fixed candidate sites are `00205489` (IRQ wait loop),
-`002196D5` (3DAh polling), `0020479A`, `0020461A`,
-`002042FC` (graphics writes), and `0020C81E` (periodic
-scheduler context). Some might not occur in a short run. The CSV
-includes `site`, `emulated_ms`, `cs`, `cs_base`,
-`observed_eip`, `snapshot_start` and `bytes_hex`.
+These bytes are captured from **the user's private copy of the game
+loaded into emulated memory**. The instrumentation in the public
+repository contains **no actual game bytes**. Do not commit any generated
+`_guest_code.csv` or extracted binaries to GitHub.
 
-**IMPORTANT: `*_guest_code.csv` contains a few bytes copied from
-the user's private, legally obtained MK2 code while it is running.
-Do not commit that CSV or any resulting .bin to GitHub.** The
-instrumentation code in the repository contains no MK2 assets.
-
-### Build and extract privately
+### Run and inspect
 
 ```powershell
 cd "$env:USERPROFILE\Documents\dosbox-staging"
@@ -607,91 +605,23 @@ $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
 & "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
 
-$codeCsv = $env:DOSBOX_MK2_TRACE -replace '\\.csv
-- `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
-- `src/hardware/pic.cpp`: IRQ0 dispatches to the emulated CPU.
-- `src/hardware/video/vga_misc.cpp`: port 3DAh reads and vertical retrace bit.
-- `src/hardware/video/vga_draw.cpp`: one call per emulated vertical refresh.
-- `src/hardware/mk2_timing_probe.h`: low-overhead counters and CSV writer.
-- `src/hardware/video/vga_memory.cpp`: per-write, read-only VGA page-handler callbacks and coverage mode.
-- `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
-- `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
-- `src/hardware/mk2_scanmem_probe.h`: raw/fastmem and effective VGA palette boundary hashes, `_scanmem.csv`.
-- `src/hardware/mk2_scanline_probe.h`: sparse line-level source indices, effective palette, VGA RGB and renderer-cache row fingerprints, `_lines.csv`.
-- `src/hardware/mk2_guest_probe.h`: opt-in CPU register/CS:EIP samples at IRQ0, VGA status reads, write-burst starts and scheduler ticks (`_guest.csv`).
-- `scripts/analyze_mk2_guest_trace.py`: offline code-location clustering and event summaries (Python standard library only).
-- `scripts/extract_mk2_guest_code.py`: extract locally saved 64-byte guest code samples into private binaries for disassembly; never commit outputs.
-- `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
-- `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
-- `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
-- `src/hardware/video/vga_attr.cpp`: attribute palette mapping and horizontal panning programming.
-- `src/hardware/video/vga_dac.cpp`: DAC RGB entry commits and PEL-mask changes.
-- `src/gui/render/render.cpp`: completed source-frame sampling after source latch.
-- `src/gui/render/mk2_frame_probe.h`: frame and visible-palette fingerprints, per-scanout CSV.
-
-The instrumentation is global to DOSBox when enabled, not tied to an MK2
-executable hash. Use it for MK1/MK3 comparisons too. Avoid treating the
-early DOS prompt rows as MK2 gameplay measurements.
-
-## Validation and limits
-
-The PIT/VGA CSV implementation was previously built and exercised by the user
-on Windows. **The five-stream integration, including the VGA register
-and scanout-memory probes, has now been built and runtime-validated on the
-user's Windows machine in the 2026-11-10 capture.** This verifies recording
-and cross-file alignment; it does not establish the accuracy of every sampled
-guest memory access or a cause for MK2's pacing.
-
-Time-counter overhead is minimized by counting in hot paths and writing once
-per emulated second. Frame tracing adds source-buffer and per-region fingerprints for each
-completed scanout (typically ~70 per second), and buffers CSV writes;
-nonzero measurement overhead remains. Always run
-a control test without tracing to check for behavioral changes.
-
-If the game never reaches its expected emulated frame rates, compare
-`window_host_ms` to `window_emulated_ms`; a host that takes much longer than
-the emulated interval may not keep up. If rates remain consistent at all three
-cycle settings, the next step is instrumenting the game's simulation-update
-routine, **not** changing PIT or VGA timing blindly.
-
-## Direct launch without DOS MOUNT commands
-
-DOSBox Staging accepts a host-side `.EXE` path as a **positional argument**;
-it mounts the containing directory as C: and runs the executable automatically.
-This is preferable to quoting `MOUNT` inside repeated `-c` arguments.
-
-From PowerShell after rebuilding the latest branch, set the environment variable
-and run your compiled DOSBox with an absolute `MK2.EXE` path:
-
-```powershell
-$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_40000.csv"
-& 'C:\Users\Usuario\Documents\dosbox-staging\build\release-windows\dosbox.exe' --noautoexec --set 'cpu_cycles_protected=40000' 'D:\GoG\Mortal Kombat 2\MK2.EXE'
+$codeCsv = [System.IO.Path]::ChangeExtension($env:DOSBOX_MK2_TRACE, $null) + "_guest_code.csv"
+python scripts/extract_mk2_guest_code.py "$codeCsv"
 ```
 
-Adjust the actual executable locations. The destination directory must exist.
-If the CSV has only the header or unexpectedly few rows, compare the emitted
-`window_host_ms` and `window_emulated_ms` values, and ensure the executable
-was rebuilt with the latest `mk2-timing-research` commits.
-, '_guest_code.csv'
-python scripts/extract_mk2_guest_code.py $codeCsv
-```
+The Python stdlib script writes private 64-byte `.bin` files next to
+the CSV and prints optional `ndisasm` (NASM) and GNU `objdump`
+commands, with guest EIP address origins. Inspect the control flow
+around the wait loop and port read and confirm calls/branches; never
+assume this output establishes the simulation frequency. The snapshots
+are **in-memory guest code**, not MK2.EXE raw file offsets.
 
-The extractor creates small **local** binary snapshots and prints
-commands for `ndisasm` (NASM) and GNU `objdump` if installed. Use
-the reported `--adjust-vma` or `-o` parameter to preserve the
-*guest EIP* in disassembly labels. The snapshot starts at a candidate
-instruction address, but it may terminate mid-instruction. Treat
-trailing disassembly lines with caution.
-
-**Build validation pending:** This narrow code-byte capture was
-committed after the normal-core CSV analysis. It has **not yet been
-compiled or tested on the user's Windows build**. No bytes are exported
-when `DOSBOX_MK2_TRACE` is unset. It reads code bytes using the normal
-DOSBox memory paging API and writes them **only to the user's local
-trace directory**. Confirm at least the wait loop and 3DAh code sites
-are captured, then inspect the local disassembly for branches and
-calls. Only if a function is proven to advance a game-state variable
-should it become a true simulation tick counter.
+**Status:** This targeted code-byte snapshot modification is
+**committed but has not yet been compiled or runtime-validated** on
+the user's Windows system. The previous seven CSV probes have been run
+successfully. If the new CSV is empty, check that the game ran beyond
+30 seconds of emulated time and that the compiled binary contains the
+new branch head.
 
 ## Source hooks
 
@@ -707,6 +637,7 @@ should it become a true simulation tick counter.
 - `src/hardware/mk2_scanline_probe.h`: sparse line-level source indices, effective palette, VGA RGB and renderer-cache row fingerprints, `_lines.csv`.
 - `src/hardware/mk2_guest_probe.h`: opt-in CPU register/CS:EIP samples at IRQ0, VGA status reads, write-burst starts and scheduler ticks (`_guest.csv`).
 - `scripts/analyze_mk2_guest_trace.py`: offline code-location clustering and event summaries (Python standard library only).
+- `scripts/extract_mk2_guest_code.py`: turn locally captured 64-byte code snapshots into private binaries; do not commit generated code data.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
