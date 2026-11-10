@@ -285,9 +285,11 @@ static void write_p3c9(io_port_t, io_val_t value, io_width_t)
 
 		// A complete three-component DAC entry was just programmed.
 		// Record the index before the VGA auto-increment occurs.
-		const auto& rgb = vga.dac.rgb[vga.dac.write_index];
 		Mk2VgaRegsProbe::Get().OnDacRgbCommit(
-		        vga.dac.write_index, rgb.red, rgb.green, rgb.blue);
+		        vga.dac.write_index,
+		        vga.dac.rgb[vga.dac.write_index].red,
+		        vga.dac.rgb[vga.dac.write_index].green,
+		        vga.dac.rgb[vga.dac.write_index].blue);
 		++vga.dac.write_index;
 		// vga.dac.read_index = vga.dac.write_index - ;
 		// disabled as it breaks Wari
