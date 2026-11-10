@@ -17,6 +17,11 @@
 
 #include "simde/x86/mmx.h"
 
+// Experimental MK2 signal probe: cheap default-off branch. The expensive
+// memory check runs only in brief windows armed after selected IRQ0 events.
+extern bool Mk2SignalInstructionActive;
+void Mk2SignalOnInstructionBoundary();
+
 #if C_DEBUGGER
 #include "debugger/debugger.h"
 #endif
@@ -133,6 +138,9 @@ static inline uint32_t Fetchd() {
 Bits CPU_Core_Normal_Run() noexcept
 {
 	while (CPU_Cycles-->0) {
+		if (Mk2SignalInstructionActive) {
+			Mk2SignalOnInstructionBoundary();
+		}
 		LOADIP;
 		core.opcode_index=cpu.code.big*0x200;
 		core.prefixes=cpu.code.big;
