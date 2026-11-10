@@ -15,6 +15,7 @@
 #include "cpu/paging.h"
 #include "hardware/memory.h"
 #include "hardware/pic.h"
+#include "hardware/mk2_vram_probe.h"
 #include "hardware/port.h"
 #include "utils/mem_host.h"
 #include "utils/string_utils.h"
@@ -211,6 +212,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -221,6 +223,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -232,6 +235,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -311,6 +315,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED2(addr);
@@ -321,6 +326,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED2(addr);
@@ -332,6 +338,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED2(addr);
@@ -456,6 +463,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -467,6 +475,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -484,6 +493,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -521,6 +531,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED2(addr);
@@ -531,6 +542,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED2(addr);
@@ -542,6 +554,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED2(addr);
@@ -578,6 +591,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 
 		if (vga.seq.map_mask == 0x4) {
@@ -644,6 +658,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -654,6 +669,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -664,6 +680,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = PAGING_GetPhysicalAddress(addr) & vgapages.mask;
 		addr += vga.svga.bank_write_full;
 		addr = CHECKED(addr);
@@ -680,6 +697,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = vga.svga.bank_write_full + (PAGING_GetPhysicalAddress(addr) & 0xffff);
 		addr = CHECKED4(addr);
 		MEM_CHANGED( addr << 3 );
@@ -689,6 +707,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = vga.svga.bank_write_full + (PAGING_GetPhysicalAddress(addr) & 0xffff);
 		addr = CHECKED4(addr);
 		MEM_CHANGED( addr << 3 );
@@ -699,6 +718,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = vga.svga.bank_write_full + (PAGING_GetPhysicalAddress(addr) & 0xffff);
 		addr = CHECKED4(addr);
 		MEM_CHANGED( addr << 3 );
@@ -771,6 +791,7 @@ public:
 	void writeb(PhysPt addr, uint8_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(1);
 		addr = PAGING_GetPhysicalAddress(addr) - vga.lfb.addr;
 		addr = CHECKED(addr);
 		host_writeb(&vga.mem.linear[addr], val);
@@ -780,6 +801,7 @@ public:
 	void writew(PhysPt addr, uint16_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(2);
 		addr = PAGING_GetPhysicalAddress(addr) - vga.lfb.addr;
 		addr = CHECKED(addr);
 		host_writew_at(vga.mem.linear, addr, val);
@@ -789,6 +811,7 @@ public:
 	void writed(PhysPt addr, uint32_t val) override
 	{
 		write_delay();
+		Mk2VramProbe::Get().OnWrite(4);
 		addr = PAGING_GetPhysicalAddress(addr) - vga.lfb.addr;
 		addr = CHECKED(addr);
 		host_writed_at(vga.mem.linear, addr, val);
@@ -1123,6 +1146,13 @@ void VGA_SetupHandlers(void) {
 		MEM_SetPageHandler(VGA_PAGE_A0, 16, &vgaph.mmio);
 	}
 range_done:
+	if (machine == MachineType::Vga || machine == MachineType::Ega) {
+		// Some modes use a direct writable mapping rather than the page
+		// handler callbacks. Preserve the mapping and report that write
+		// accesses in those modes cannot be observed by this probe.
+		Mk2VramProbe::Get().OnVgaMapping(
+		        static_cast<int>(vga.mode), newHandler != &vgaph.map);
+	}
 	PAGING_ClearTLB();
 }
 
