@@ -874,23 +874,23 @@ from the actual machine instructions, not address-frequency guesses.
 
 ### A. `0180:00205489`: wait for a nonzero work/clock value
 
-The first four instructions read a pointer from guest linear address
-`0x27177C`, load a 32-bit value at `[ESI+0x24]`, test for zero and
+The first four instructions read a pointer from guest **DS-relative offset**
+`0x27177C`, load a 32-bit value at `DS:[ESI+0x24]`, test for zero and
 branch **back to `0x205489` while zero**:
 
 ```text
-ESI = uint32[0x27177C]
-value = uint32[ESI + 0x24]
+ESI = uint32[DS:0x27177C]
+value = uint32[DS:ESI + 0x24]
 if (value == 0) goto 0x205489
 ```
 
 On nonzero, it performs these observable actions:
 
 ```text
-uint32[0x275B0C] = value
-uint32[0x275B10] =
-    (uint32[0x275B10] + (value << 1)) >> 1
-uint32[ESI + 0x24] = 0
+uint32[DS:0x275B0C] = value
+uint32[DS:0x275B10] =
+    (uint32[DS:0x275B10] + (value << 1)) >> 1
+uint32[DS:ESI + 0x24] = 0
 ESI = 0x275B04
 goto 0x2054FE
 ```
@@ -906,13 +906,13 @@ mechanism for a 32-bit memory value, likely representing pending work
 or timing signals. Because it can read any nonzero value, it cannot be
 assumed to be strictly boolean or a one-per-frame flag.
 
-**Not demonstrated:** What writes `[uint32[0x27177C]+0x24]`;
+**Not demonstrated:** What writes `DS:[uint32[DS:0x27177C]+0x24]`;
 whether the writer is IRQ0, another interrupt, sound, a helper loop,
 or combat-logic code; whether one nonzero read advances one fighter
 simulation tick; or what subsequent code does after `0x2054FE`.
 
 **Best next step:** identify the producer/writer of this exact
-**dynamic linear guest address** and record its transitions/timestamps
+**dynamic DS-relative guest address** and record its transitions/timestamps
 independently of the consumer. Do not increment a gameplay-tick
 counter merely whenever this busy-wait loop exits.
 
@@ -924,7 +924,7 @@ DX was proven by the hook to be the VGA status port `0x3DA`.
 Thus this **waits for vertical retrace**.
 
 On success it tests bit `0x8000` of the 32-bit word at
-`0x2B5CE8`, skips via a conditional branch to `0x21971F`
+the DS-relative offset `0x2B5CE8`, skips via a conditional branch to `0x21971F`
 if set, and otherwise:
 
 - Writes DAC palette-index **0** to I/O port **`0x3C8`**;
@@ -994,14 +994,16 @@ We now have **instruction-level evidence** separating the wait-for-
 nonzero loop, VGA-synchronized DAC writes, unrolled buffer processing,
 and an unidentified table/byte routine. The strongest lead toward
 measuring true simulation cadence is the **producer** of
-`[uint32[0x27177C] + 0x24]`; the currently observed consumer is not
+`DS:[uint32[DS:0x27177C] + 0x24]`; the currently observed consumer is not
 automatically the game tick.
 
 Next controlled test should:
 
-1. Read and record the **runtime pointer value**
-   `uint32[0x27177C]`, and the resulting watched linear address
-   `pointer + 0x24`. It could vary between game states.
+1. Read and record **DS selector/base** and the **runtime pointer value**
+   `uint32[DS:0x27177C]`. The watched **linear** address is
+   `DS.base + pointer + 0x24` (subject to segment validity/limit rules).
+   **CS base was observed as zero, but DS base has not yet been measured.**
+   The pointer itself could vary between game states.
 2. Capture **actual writes** to that address, including the writer
    `CS:EIP`, value before/after and PIC emulated timestamp, using a
    carefully scoped **normal-core** watchpoint or equivalent debugger
@@ -1020,6 +1022,6 @@ changed by this analysis.**
 
 ## Context to restore in a new chat
 
-> Continue MK2 DOS timing investigation in repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, using this findings report and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz, recurring source-frame visual cadence 3-1-1-2. Six visual/VGA probes were validated and found 70,000 matching VGA-to-source-cache line hashes, and frames that can change because writes during scanout N are first read in N+1. Seventh guest-context probe captured `mk2_40000_20261110_133415_guest.csv` (dynamic/auto), and `mk2_normal_40000_20261110_134308_guest.csv` (normal). In normal, 6,963/7,076 pre-IRQ0 samples are in page `00205400`, distributed almost equally among exact `CS:EIP=0180:00205489/8F/92/94` (possible tight loop). All 1,531 3DAh sync rising and 5,402 sampled port reads show `0180:002196D5` (candidate polling instruction). VRAM first-write samples are concentrated in code pages `00204200–002049FF`. None of these has been demonstrated to be an MK2 simulation tick. **NEW untested branch change:** a small, one-time, 64-byte guest code snapshot probe for six known locations, saved LOCALLY to `*_guest_code.csv` when the ordinary `DOSBOX_MK2_TRACE` is enabled. Helper `scripts/extract_mk2_guest_code.py` writes local .bin snippets and prints ndisasm/objdump commands. Next: compile, run a short core=normal combat trace, inspect snapshot CSV, privately disassemble candidate code, verify actual loop/state changes before counting ticks. Do not put guest MK2 code bytes or assets in the repository or modify PIT/VGA/guest binary timing.
+> Continue MK2 DOS research in `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read `docs/mk2-timing-research-findings-2026-11-09.md` (especially **Six guest code snippets: confirmed x86 instruction analysis**) and `docs/mk2-timing-research.md`. Earlier: PIT0 ~60.052 Hz, VGA ~70.09 Hz, 3-1-1-2 visual intervals and 70,000/70,000 VGA source-cache line hash agreement; 837 changed images without later writes are consistent with writes during the preceding scanout. Normal-core CPU sampling confirmed busy-wait PCs 0x205489/8F/92/94 and VGA status poll PC 0x2196D5. **The user has now uploaded and we have actually disassembled six 64-byte x86 code snippets.** 0x205489 loads ESI from DS:[0x27177C], loops while DWORD DS:[ESI+0x24] == 0, and on nonzero saves the value to DS:[0x275B0C], updates DS:[0x275B10], clears DS:[ESI+0x24], then jumps to 0x2054FE (outside snippet). The producer of the pending value is unknown. 0x2196D5 waits via `in al,dx` / `test al,8` at VGA 0x3DA, then conditionally sets DAC palette entry 0 using ports 0x3C8/0x3C9 and a word at DS:[0x2B5CE8]. 0x2042FC, 0x20461A, 0x20479A are unrolled buffer compare/copy patterns; 0x20C81E is an unidentified byte-processing/table-lookup helper, not a demonstrated simulation tick. CS base was zero in traces, but **DS base was not captured**; don't assume listed DS offsets are linear addresses. Next: limited normal-core watchpoint with exact DS base and resolved dynamic address (DS:[ESI+0x24]), identify producer's guest CS:EIP, then inspect its control flow and the consumer continuation at 0x2054FE. Do not declare a game tick or change PIT/VGA timing before confirming actual game-state transitions. Private game code snippets are NOT uploaded to GitHub.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
