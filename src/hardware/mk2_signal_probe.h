@@ -268,6 +268,7 @@ private:
         uint16_t irq0_vector_segment = 0;
         uint16_t irq0_vector_offset = 0;
         uint8_t protected_mode = 0;
+        uint8_t code_bits = 32;
         std::array<uint8_t, CodeBytes> bytes = {};
     };
 
@@ -341,7 +342,7 @@ private:
             // scripts/extract_mk2_guest_code.py format.
             code_output << "site,emulated_ms,cs,cs_base,observed_eip,"
                            "snapshot_start,bytes_hex,protected_mode,"
-                           "ivt_irq0_segment,ivt_irq0_offset\n";
+                           "code_bits,ivt_irq0_segment,ivt_irq0_offset\n";
         }
 
         enabled = true;
@@ -378,7 +379,16 @@ private:
         snapshot.cs_base = base;
         snapshot.observed_eip = observed_eip;
         snapshot.start_eip = start_eip;
-        snapshot.protected_mode = static_cast<uint8_t>(cpu.pmode);
+        const bool is_current_code_segment =
+                selector == producer.cs && base == producer.cs_base;
+        // The producer is the current CPU code segment; its D/B bit
+        // selects 16/32-bit decoding independent of real/protected
+        // mode. The independently sampled 0180:2054FE consumer is
+        // known to use 32-bit instructions.
+        snapshot.protected_mode = static_cast<uint8_t>(
+                is_current_code_segment ? cpu.pmode : 1);
+        snapshot.code_bits = static_cast<uint8_t>(
+                is_current_code_segment ? (cpu.code.big ? 32 : 16) : 32);
         snapshot.irq0_vector_offset =
                 mem_readw<MemOpMode::SkipBreakpoints>(0x20u);
         snapshot.irq0_vector_segment =
@@ -436,6 +446,7 @@ private:
             }
             code_output << std::dec << std::setfill(' ')
                         << ',' << static_cast<unsigned>(snapshot.protected_mode)
+                        << ',' << static_cast<unsigned>(snapshot.code_bits)
                         << ',' << snapshot.irq0_vector_segment
                         << ',' << snapshot.irq0_vector_offset << '\n';
             snapshot.written = true;
