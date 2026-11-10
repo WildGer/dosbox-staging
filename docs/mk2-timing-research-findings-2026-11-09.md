@@ -1471,7 +1471,12 @@ user data and are NOT in the GitHub repository.
   at **39,438.852 ms** consumer writes **10 -> 0** in
   one store. This demonstrates an accumulating time/work
   counter, but **not that 10 distinct game simulation
-  updates were recovered**. Visual output was mostly
+  updates were recovered**.
+  Immediately after the 39,438.852-ms clear the recorded
+  scheduler made individual task dispatches at approximately
+  39,440.035–39,440.041 ms, **not a visible tenfold burst**
+  of the two primary task callbacks. This does not rule out
+  other downstream catch-up or elapsed-time accounting. Visual output was mostly
   static around that phase; do not presume cause.
 - `_frames.csv`: **6,652 scanouts**, **2,578 changed**
   visible images, 4,074 repeats; VGA roughly **70.09 Hz**.
