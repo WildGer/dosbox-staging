@@ -277,6 +277,7 @@ public:
         row.ebp = reg_ebp;
         row.edi = reg_edi;
         row.cs = SegValue(cs);
+        CaptureDispatchCallbackCode(row.handler_eip, row.emulated_ms);
     }
 
     void OnClockTick(const uint32_t ms)
@@ -285,6 +286,7 @@ public:
             Flush();
             FlushCode();
             FlushDispatch();
+            FlushDispatchCode();
         }
     }
 
@@ -297,6 +299,16 @@ private:
     static constexpr std::size_t CodeBytes = 128;
     static constexpr std::size_t CodeSiteCount = 3;
     static constexpr std::size_t DispatchBufferSize = 4096;
+    static constexpr std::size_t DispatchCodeBytes = 256;
+    static constexpr std::size_t DispatchCodeSites = 14;
+
+    struct DispatchCodeSnapshot {
+        bool captured = false;
+        bool written = false;
+        uint32_t eip = 0;
+        double emulated_ms = 0;
+        std::array<uint8_t, DispatchCodeBytes> bytes = {};
+    };
 
     struct DispatchRow {
         double emulated_ms = 0;
@@ -414,6 +426,22 @@ private:
                                "ebp,edi,dropped_count\n";
         }
 
+        // Only a small, selected set of callback ENTRY instructions is
+        // captured from the user's running MK2 memory. This output is
+        // private and contains no game bytes in the fork source.
+        const auto dispatch_code_path = trace.substr(0, cut) +
+                                        "_dispatch_code" +
+                                        (cut < trace.size()
+                                                 ? trace.substr(cut)
+                                                 : ".csv");
+        dispatch_code_output.open(dispatch_code_path,
+                                  std::ios::out | std::ios::trunc);
+        if (dispatch_code_output.is_open()) {
+            dispatch_code_output << "site,emulated_ms,cs,cs_base,"
+                                    "observed_eip,snapshot_start,"
+                                    "bytes_hex,code_bits\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -425,6 +453,7 @@ private:
         Flush();
         FlushCode();
         FlushDispatch();
+        FlushDispatchCode();
     }
 
     // The source at 09B0:08AF has now been observed through both
@@ -491,6 +520,73 @@ private:
         CaptureSite(2, "consumer_after_wait_2054FE",
                     producer, 0x0180u, 0u,
                     0x002054feu, 0x002054feu);
+    }
+
+    // Prioritize the stable 60-Hz work tasks, their phase-dependent
+    // replacements, and several independently timed callbacks from
+    // the actual 17,403-row MK2 dispatch capture. No speculative
+    // guest code or asset bytes are embedded in this source.
+    void CaptureDispatchCallbackCode(const uint32_t handler_eip,
+                                     const double emulated_ms)
+    {
+        if (!dispatch_code_output.is_open() ||
+            handler_eip > std::numeric_limits<PhysPt>::max() -
+                                  DispatchCodeBytes) {
+            return;
+        }
+
+        static constexpr std::array<uint32_t, DispatchCodeSites> targets = {
+                0x002133b5u, 0x0022047du, 0x00223dfdu, 0x002239b2u,
+                0x00202d95u, 0x00213213u, 0x0021ff5du, 0x0022fb73u,
+                0x00201d8au, 0x0022fabfu, 0x00230101u, 0x0021455au,
+                0x00221ee0u, 0x00224beau};
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            if (targets[i] != handler_eip || dispatch_code[i].captured) {
+                continue;
+            }
+            auto& sample = dispatch_code[i];
+            sample.eip = handler_eip;
+            sample.emulated_ms = emulated_ms;
+            // Here CS=0180 and CS.base=0, confirmed by the caller's
+            // guard. All selected callbacks use 32-bit code.
+            for (std::size_t j = 0; j < DispatchCodeBytes; ++j) {
+                sample.bytes[j] =
+                        mem_readb<MemOpMode::SkipBreakpoints>(
+                                static_cast<PhysPt>(handler_eip + j));
+            }
+            sample.captured = true;
+            return;
+        }
+    }
+
+    void FlushDispatchCode()
+    {
+        if (!dispatch_code_output.is_open()) {
+            return;
+        }
+        for (auto& sample : dispatch_code) {
+            if (!sample.captured || sample.written) {
+                continue;
+            }
+            dispatch_code_output << "callback_" << std::hex
+                                 << std::uppercase << std::setfill('0')
+                                 << std::setw(8) << sample.eip
+                                 << std::dec << std::nouppercase
+                                 << std::setfill(' ') << ','
+                                 << std::fixed << std::setprecision(6)
+                                 << sample.emulated_ms
+                                 << ",384,0," << sample.eip << ','
+                                 << sample.eip << ','
+                                 << std::hex << std::setfill('0');
+            for (const auto byte : sample.bytes) {
+                dispatch_code_output << std::setw(2)
+                                     << static_cast<unsigned>(byte);
+            }
+            dispatch_code_output << std::dec << std::setfill(' ')
+                                 << ",32\n";
+            sample.written = true;
+        }
+        dispatch_code_output.flush();
     }
 
     void FlushDispatch()
@@ -655,9 +751,11 @@ private:
     std::ofstream output = {};
     std::ofstream code_output = {};
     std::ofstream dispatch_output = {};
+    std::ofstream dispatch_code_output = {};
     std::array<Entry, BufferCount> buffer = {};
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
     std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
+    std::array<DispatchCodeSnapshot, DispatchCodeSites> dispatch_code = {};
     std::size_t dispatch_count = 0;
     uint64_t dispatch_written = 0;
     uint64_t dispatch_dropped = 0;
