@@ -24,6 +24,7 @@
 #include "gui/render/mk2_frame_probe.h"
 #include "gui/render/render_backend.h"
 #include "hardware/pic.h"
+#include "hardware/mk2_vram_probe.h"
 #include "hardware/video/vga.h"
 #include "misc/notifications.h"
 #include "misc/support.h"
@@ -409,6 +410,7 @@ void RENDER_EndUpdate(const bool abort)
 		// repaints, which are not new game frames.
 		if (DOSBOX_IsRunning()) {
 			const auto& source = render.last_complete_source;
+			Mk2VramProbe::Get().OnCompletedScanout(PIC_FullIndex());
 			Mk2FrameProbe::Get().OnCompletedScanout(
 			        PIC_FullIndex(),
 			        reinterpret_cast<const uint8_t*>(source.cache.data()),
