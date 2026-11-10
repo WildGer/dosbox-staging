@@ -17,6 +17,7 @@
 #include "gui/render/scaler/scalers.h"
 #include "hardware/mk2_timing_probe.h"
 #include "hardware/mk2_vram_probe.h"
+#include "hardware/mk2_vga_regs_probe.h"
 #include "hardware/pic.h"
 #include "hardware/video/reelmagic/reelmagic.h"
 #include "ints/int10.h"
@@ -1398,11 +1399,15 @@ static void VGA_DisplayStartLatch(uint32_t /*val*/)
 {
 	vga.config.real_start = vga.config.display_start & (vga.vmemwrap - 1);
 	vga.draw.bytes_skip   = vga.config.bytes_skip;
+	Mk2VgaRegsProbe::Get().OnStartLatch(
+	        vga.config.display_start, vga.config.real_start);
 }
 
 static void VGA_PanningLatch(uint32_t /*val*/)
 {
 	vga.draw.panning = vga.config.pel_panning;
+	Mk2VgaRegsProbe::Get().OnPanningLatch(
+	        vga.config.pel_panning, vga.draw.panning);
 }
 
 static void VGA_VerticalTimer(uint32_t /*val*/)
@@ -1410,6 +1415,12 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 	vga.draw.delay.framestart = PIC_FullIndex();
 	Mk2TimingProbe::Get().OnVgaFrame(vga.draw.delay.framestart);
 	Mk2VramProbe::Get().OnVgaRefresh(vga.draw.delay.framestart);
+	Mk2VgaRegsProbe::Get().OnVgaRefresh(
+	        vga.draw.delay.framestart,
+	        vga.config.display_start,
+	        vga.config.real_start,
+	        vga.config.pel_panning,
+	        vga.draw.panning);
 	PIC_AddEvent(VGA_VerticalTimer, vga.draw.delay.vtotal);
 
 	switch (machine) {
