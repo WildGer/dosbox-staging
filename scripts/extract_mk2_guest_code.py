@@ -42,6 +42,12 @@ def main() -> None:
             # Avoid treating externally edited CSV text as a path component.
             safe_label = re.sub(r"[^A-Za-z0-9_-]", "_", label)
             start = int(row["snapshot_start"])
+            # The legacy _guest_code.csv records 32-bit protected-mode
+            # code. The new _signal_code.csv includes actual CS D/B
+            # information: interrupt service code can be 16-bit.
+            bits = int(row.get("code_bits") or 32)
+            if bits not in (16, 32):
+                raise ValueError(f"Unsupported code_bits={bits} for {label}")
             hexdigits = row["bytes_hex"].strip()
             data = bytes.fromhex(hexdigits)
             if not data or len(data) > 256:
@@ -50,9 +56,14 @@ def main() -> None:
             output.write_bytes(data)
             saved += 1
             print(f"{output}  ({len(data)} bytes, start guest EIP 0x{start:08X})")
-            print(f"  ndisasm -b 32 -o 0x{start:X} \"{output}\"")
-            print(f"  objdump -D -b binary -m i386 -M intel "
+            machine = "i8086" if bits == 16 else "i386"
+            print(f"  ndisasm -b {bits} -o 0x{start:X} \"{output}\"")
+            print(f"  objdump -D -b binary -m {machine} -M intel "
                   f"--adjust-vma=0x{start:X} \"{output}\"")
+            if "ivt_irq0_segment" in row:
+                seg = int(row["ivt_irq0_segment"])
+                off = int(row["ivt_irq0_offset"])
+                print(f"  IVT IRQ0 vector at capture: {seg:04X}:{off:04X}")
 
     print(f"Extracted {saved} local snapshots.")
     if not saved:
