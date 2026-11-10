@@ -29,6 +29,12 @@ public:
         return probe;
     }
 
+    // This reuses the existing source-pixel hash instead of hashing the
+    // 32-bit rendered frame a second time in the scan-memory probe.
+    uint64_t LastFrameIndex() const { return scanout_count; }
+    uint64_t LastVisibleHash() const { return previous_visible_hash; }
+    bool LastVisibleChanged() const { return previous_changed; }
+
     void OnCompletedScanout(const double emulated_ms,
                             const uint8_t* pixels,
                             const int width,
@@ -216,6 +222,7 @@ public:
         previous_pixel_hash = pixel_hash;
         previous_palette_hash = visible_palette_hash;
         previous_visible_hash = visible_hash;
+        previous_changed = changed;
         previous_regions_valid = regions_valid;
         if (regions_valid) {
             previous_region_hashes = region_hashes;
@@ -278,6 +285,7 @@ private:
     uint64_t previous_pixel_hash = 0;
     uint64_t previous_palette_hash = 0;
     uint64_t previous_visible_hash = 0;
+    bool previous_changed = false;
     std::array<uint64_t, 40> previous_region_hashes = {};
     bool previous_regions_valid = false;
     int previous_width = 0;
