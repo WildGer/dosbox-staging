@@ -26,6 +26,7 @@
 #include "hardware/pic.h"
 #include "hardware/mk2_vram_probe.h"
 #include "hardware/mk2_vga_regs_probe.h"
+#include "hardware/mk2_scanmem_probe.h"
 #include "hardware/video/vga.h"
 #include "misc/notifications.h"
 #include "misc/support.h"
@@ -428,7 +429,24 @@ void RENDER_EndUpdate(const bool abort)
 			        static_cast<int>(source.src.pixel_format),
 			        source.src.pixel_format == PixelFormat::Indexed8,
 			        source.palette.rgb.data());
+
+			// The image probe already hashed the completed RGB-equivalent
+			// source image. Reuse that hash; only raw VGA memory and the DAC
+			// palette need sampling again at this boundary.
+			const auto& frame_probe = Mk2FrameProbe::Get();
+			Mk2ScanmemProbe::Get().OnComplete(
+			        scanout_timestamp,
+			        frame_probe.LastFrameIndex(),
+			        frame_probe.LastVisibleHash(),
+			        frame_probe.LastVisibleChanged(),
+			        source.src.width,
+			        source.src.height,
+			        static_cast<int>(source.src.pixel_format));
+		} else {
+			Mk2ScanmemProbe::Get().OnAbort();
 		}
+	} else {
+		Mk2ScanmemProbe::Get().OnAbort();
 	}
 
 	// Two gates on captures:
