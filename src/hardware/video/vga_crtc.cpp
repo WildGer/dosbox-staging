@@ -9,6 +9,7 @@
 #include "cpu/cpu.h"
 #include "debugger/debugger.h"
 #include "hardware/pic.h"
+#include "hardware/mk2_vga_regs_probe.h"
 
 void VGA_MapMMIO(void);
 void VGA_UnmapMMIO(void);
@@ -210,6 +211,8 @@ void vga_write_p3d5(io_port_t, io_val_t value, io_width_t)
 		vga.crtc.start_address_high = val;
 		vga.config.display_start = (vga.config.display_start & 0xFF00FF) |
 		                           (val << 8);
+		Mk2VgaRegsProbe::Get().OnCrtcStartWrite(
+		        0x0c, val, vga.config.display_start, vga.config.real_start);
 
 		// 0-7  Upper 8 bits of the start address of the display buffer.
 		break;
@@ -217,6 +220,8 @@ void vga_write_p3d5(io_port_t, io_val_t value, io_width_t)
 	case 0x0d: // Start Address Low Register
 		vga.crtc.start_address_low = val;
 		vga.config.display_start = (vga.config.display_start & 0xFFFF00) | val;
+		Mk2VgaRegsProbe::Get().OnCrtcStartWrite(
+		        0x0d, val, vga.config.display_start, vga.config.real_start);
 
 		//0-7	Lower 8 bits of the start address of the display buffer.
 		break;
