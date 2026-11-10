@@ -601,8 +601,99 @@ specific state transitions.
    site and compare logic tick intervals against PIT, VRAM, image changes,
    and input response timing. Do not alter timing to force desired FPS.
 
+## Seventh-stage first results: sampled MK2 guest code locations (2026-11-10)
+
+**Data source:** user-provided stdout from
+`scripts/analyze_mk2_guest_trace.py`, input
+`mk2_40000_20261110_133415_guest.csv` (raw CSV not attached in this
+turn and **not stored in GitHub**). This is a *summary of selected CPU
+contexts*, not a complete dynamic trace or disassembly.
+
+### Sample totals and prominent execution contexts
+
+- 30,385 context samples collected; 30,328 in protected mode and 57
+  in real mode (the 120-second 30–150s sample interval includes some
+  DOS or BIOS activity).
+- Of 7,207 `irq0_pre` samples (about **60.06/s** over the ~120 s
+  sampling window), 7,097 (98.5%) had `CS:EIP =
+  0180:00205489`, `cs_base=0`. Another 87 (1.2%) had
+  `0180:002196D5`. This captures **interrupted** code; it does not
+  locate IRQ0's handler or the simulation update.
+- All **1,473** `vga_status_rising` and all **5,029**
+  `vga_status_sample` events reported
+  `0180:002196D5` with CS base 0. Median spacing of
+  VSYNC rising samples was **99.876 ms**, matching seven approximately
+  70.09-Hz VGA periods; this is compatible with regular polling of
+  retrace, not proof of a 10-Hz simulation step. Number of observed
+  rising samples across the window is greater than 1 per 100ms: the
+  median alone should not be treated as the global frequency.
+- **4,676** `vram_first_write_ms` samples concentrated in code
+  pages `0180:00204200` through `0180:002049FF`;
+  prominent exact saved positions included `002042FC` (587
+  samples), `0020482A` (556), and `0020452A` (442).
+  Median recurrence within individual code *pages* varied (about
+  33, 59, 67, 99, 100, and 199 ms). Because samples are the
+  **first observed VGA write in a 1-ms bucket** and pages aggregate
+  many actual offsets, these are not render-frame intervals or
+  evidence of an intrinsic 10-Hz engine.
+- In **12,000** independent 10-ms scheduler samples,
+  `0180:00205489` appeared 7,923 times (66.0%),
+  `0180:002196D5` 1,041 times (8.7%),
+  the page `0180:0020C800` 733 times (6.1%),
+  and `0180:00208700` 375 times (3.1%).
+  Other code pages may be animation, logic, audio, resource management
+  or helper routines; they **must be verified** before labelling.
+
+### Tentative roles and what we have NOT proved
+
+| Guest CS:EIP / page | Supported observation | Working hypothesis |
+|---|---|---|
+| `0180:002196D5` | Captured at every sampled 3DAh read | Port-3DAh polling or retrace-wait routine |
+| `0180:00205489` | Dominates interrupted and periodic CPU samples | Idle/wait location, or stable EIP retained at dynamic-core block boundary |
+| `0180:00204200–002049FF` | First intercepted VGA page-handler writes | Pixel drawing, screen compositing, copy/fill routine(s) |
+| `0180:0020C800`, `0180:00208700` | Recurrent periodic samples; no guest disassembly | Unknown code; possible candidates for further investigation |
+
+**Critical qualification:** DOSBox Staging's CPU configuration documents
+`core=auto` as selecting **dynamic core in protected mode**. The dynamic
+core translates instructions in blocks, so the `reg_eip` saved in
+callbacks (VGA I/O, VRAM write, pre-IRQ) might refer to a translated
+block's cached or entry IP instead of the exact guest instruction
+responsible for the event. The report above used
+`cs_base=00000000`, but it does **not** establish how a guest linear
+address maps to offsets within MK2's executable on disk. There has
+been no static disassembly and no simulation-state watchpoint.
+
+### Recommended controlled validation before a guest logic counter
+
+Use **two short diagnostic captures** of the same game action,
+preferably at 40,000 cycles:
+
+1. With the existing `core=auto`, keep the sampled PC clusters as a
+   baseline.
+2. Temporarily run with DOSBox Staging `--set core=normal` to interpret
+   guest instructions individually, not from dynamic translations.
+   The normal core can be significantly slower than real time;
+   this run is **only for locating candidate code**. Do not use its
+   frame pacing or wall-time metrics as an equivalent benchmark.
+3. Capture at least some gameplay inside the already defined
+   **30–150s** guest-probe window and rerun
+   `scripts/analyze_mk2_guest_trace.py`. Look for whether
+   `0180:002196D5`, `0180:00205489` and the VGA-write
+   code pages remain recognizable or shift to adjacent instructions.
+4. Disassemble candidate *guest* code with its actual DOS extender and
+   load mapping. Do not assume `EIP=002196D5` is a raw file
+   offset. Before a targeted counter is meaningful, confirm a
+   specific routine updates a game-state variable or animation state.
+5. Only then instrument confirmed guest state-transition boundaries
+   (e.g. a fighter-position/animation-step update) and measure the
+   intervals relative to PIT/VGA. A merely frequent PC or IRQ0
+   occurrence is **not a game logic tick**.
+
+The findings section and handoff should be updated again once an actual
+normal-core or disassembly check is performed.
+
 ## Context to restore in a new chat
 
-> Research project: DOSBox Staging MK2 DOS timing, repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. First read this document (especially the sections on the six-stream scanline analysis and the seventh-stage guest code discovery) and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz; image change interval pattern 3-1-1-2 recurs at 20k/40k/80k CPU cycles. Six opt-in CSV probes are Windows-validated; last six-CSV capture `mk2_40000_20261110_131108` had 11,434 source scanouts and 70,000 sampled scanlines. Every VGA-generated RGB sampled line matched the source cache. Of 837 changed graphics frames without recent VRAM write or DAC commit, all followed a scanout with VRAM writes during drawing, and 32/32 directly line-sampled cases changed source indices. This supports ordinary next-scanout visibility, NOT a proven renderer bug. The new seventh `_guest.csv` probe on branch is NOT YET Windows-tested: captures guest CS:EIP+CPU registers before IRQ0, at first VRAM write per ms, sparse VGA status polling, and 10-ms scheduler ticks during emulated seconds 30–150. Offline helper: `scripts/analyze_mk2_guest_trace.py`. These are code candidates, NOT real simulation ticks; guest EIP can be imprecise under dynamic core. Next: build, run 160+ sec at 40k, upload seven CSVs and launch log, locate candidate MK2 game-loop code then confirm with disassembly/targeted watchpoint. Preserve PIT/IRQ/VGA timings, original gameplay and private GOG assets; no original game files in repo.
+> Continue MK2 DOS timing study in GitHub repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, documents `docs/mk2-timing-research.md` and `docs/mk2-timing-research-findings-2026-11-09.md`. Six VGA-oriented CSV probes were Windows-validated; the sixth line trace showed 70,000/70,000 VGA output-to-renderer-cache hash agreement, and explained 837 formerly mysterious changes as compatible with prior-scanout guest VRAM writes. Seventh opt-in `_guest.csv` probe was built and supplied as analyzer stdout `mk2_40000_20261110_133415_guest.csv`: 30,385 context samples, ~120 s. 7,097/7,207 pre-IRQ0 samples at `0180:00205489`; ALL 1,473 status-rising and ALL 5,029 status-sampling events at `0180:002196D5`, median VSYNC-rising separation 99.876 ms; 4,676 VRAM first-write context samples concentrated in `0180:00204200–002049FF`. Other periodic PCs include `0180:0020C800`, `0180:00208700`. These are candidate CPU locations **NOT simulation ticks**. DOSBox Staging `core=auto` uses dynamic core in protected mode; callback EIPs may be stale/block-level. Next: short `core=normal` diagnostic capture to validate location precision, then disassemble guest code with correct DOS extender mapping; identify a real game-state update routine before counting simulation ticks. Do not alter PIT (60.052 Hz), VGA (70.09 Hz), MK2 binaries or gameplay timing. All game assets remain private; raw CSVs are not committed to GitHub.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
