@@ -9,6 +9,7 @@
 #include "vga.h"
 
 #include "hardware/mk2_timing_probe.h"
+#include "hardware/mk2_guest_probe.h"
 #include "hardware/pic.h"
 #include "hardware/port.h"
 
@@ -42,6 +43,7 @@ uint8_t vga_read_p3da(io_port_t, io_width_t)
 		}
 	}
 	Mk2TimingProbe::Get().OnVgaStatusRead(retval);
+	Mk2GuestProbe::Get().OnVgaStatus(retval, PIC_FullIndex());
 	return retval;
 }
 
