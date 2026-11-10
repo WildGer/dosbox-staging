@@ -624,90 +624,78 @@ successfully. If the new CSV is empty, check that the game ran beyond
 30 seconds of emulated time and that the compiled binary contains the
 new branch head.
 
-## Source hooks
+## NEW: targeted pending-work signal writer watch (`*_signal.csv`)
 
-- `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
-- `src/hardware/pic.cpp`: IRQ0 dispatches to the emulated CPU.
-- `src/hardware/video/vga_misc.cpp`: port 3DAh reads and vertical retrace bit.
-- `src/hardware/video/vga_draw.cpp`: one call per emulated vertical refresh.
-- `src/hardware/mk2_timing_probe.h`: low-overhead counters and CSV writer.
-- `src/hardware/video/vga_memory.cpp`: per-write, read-only VGA page-handler callbacks and coverage mode.
-- `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
-- `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
-- `src/hardware/mk2_scanmem_probe.h`: raw/fastmem and effective VGA palette boundary hashes, `_scanmem.csv`.
-- `src/hardware/mk2_scanline_probe.h`: sparse line-level source indices, effective palette, VGA RGB and renderer-cache row fingerprints, `_lines.csv`.
-- `src/hardware/mk2_guest_probe.h`: opt-in CPU register/CS:EIP samples at IRQ0, VGA status reads, write-burst starts and scheduler ticks (`_guest.csv`).
-- `scripts/analyze_mk2_guest_trace.py`: offline code-location clustering and event summaries (Python standard library only).
-- `scripts/extract_mk2_guest_code.py`: turn locally captured 64-byte code snapshots into private binaries; do not commit generated code data.
-- `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
-- `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
-- `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
-- `src/hardware/video/vga_attr.cpp`: attribute palette mapping and horizontal panning programming.
-- `src/hardware/video/vga_dac.cpp`: DAC RGB entry commits and PEL-mask changes.
-- `src/gui/render/render.cpp`: completed source-frame sampling after source latch.
-- `src/gui/render/mk2_frame_probe.h`: frame and visible-palette fingerprints, per-scanout CSV.
+The privately decoded MK2 wait loop at `0180:00205489` repeatedly
+reads `DS:[ESI+0x24]`, with ESI loaded from `DS:[0x27177C]`.
+When the value is nonzero it saves it, adjusts another variable,
+and resets `DS:[ESI+0x24]` to zero. We still do not know **who
+produces the nonzero signal**, or whether it represents one combat
+logic tick.
 
-The instrumentation is global to DOSBox when enabled, not tied to an MK2
-executable hash. Use it for MK1/MK3 comparisons too. Avoid treating the
-early DOS prompt rows as MK2 gameplay measurements.
+A new, **separately opt-in**, experimental memory-write watch
+(`src/hardware/mk2_signal_probe.h`) records the signal producer's
+address and timestamp.
 
-## Validation and limits
+- Just **before IRQ0 dispatch**, when `core=normal` is interrupted
+  in the known `0180:00205489–00205494` consumer loop, it reads
+  the real DS selector and descriptor base, then the DWORD at
+  `DS.base + 0x27177C`, then resolves the watched linear address
+  `DS.base + pointer + 0x24`. **Do not assume DS base is zero.**
+- A guarded hook in `src/cpu/paging.h` observes normal-core
+  byte/word/dword/qword memory writes. It only reads guest memory
+  and captures CPU CS:EIP if a store **overlaps the 4-byte signal
+  or its pointer variable**. Cross-page stores are observed as
+  constituent byte stores.
+- Buffered entries are flushed every emulated second. No code or
+  guest state is modified. A small default-off branch remains in
+  the normal memory-writing path when the watch is disabled.
 
-The PIT/VGA CSV implementation was previously built and exercised by the user
-on Windows. **The five-stream integration, including the VGA register
-and scanout-memory probes, has now been built and runtime-validated on the
-user's Windows machine in the 2026-11-10 capture.** This verifies recording
-and cross-file alignment; it does not establish the accuracy of every sampled
-guest memory access or a cause for MK2's pacing.
+Set **both** `DOSBOX_MK2_TRACE` (as in all earlier experiments)
+and `DOSBOX_MK2_SIGNAL_WATCH=1` before launching. Use **core=normal**.
+The probe samples emulated seconds 30–150. It does not capture
+direct-mapped writes made by dynamic translation and may miss pointer
+changes between consumer refreshes. It has **not yet been compiled
+or runtime-validated on Windows**.
 
-Time-counter overhead is minimized by counting in hot paths and writing once
-per emulated second. Frame tracing adds source-buffer and per-region fingerprints for each
-completed scanout (typically ~70 per second), and buffers CSV writes;
-nonzero measurement overhead remains. Always run
-a control test without tracing to check for behavioral changes.
+The `*_signal.csv` output contains event `resolve`,
+`pointer_write`, `pointer_same`, `signal_write` or
+`signal_same`, together with `emulated_ms`, consumer DS
+selector/base, pointer value and location, actual watched linear
+address, original guest store address/width, DWORD before/after,
+and writer CS:EIP and DS context.
 
-If the game never reaches its expected emulated frame rates, compare
-`window_host_ms` to `window_emulated_ms`; a host that takes much longer than
-the emulated interval may not keep up. If rates remain consistent at all three
-cycle settings, the next step is instrumenting the game's simulation-update
-routine, **not** changing PIT or VGA timing blindly.
+A nonzero producer store is **not automatically a gameplay tick**.
+We must identify/disassemble the writer before assigning meaning.
 
-## Direct launch without DOS MOUNT commands
-
-DOSBox Staging accepts a host-side `.EXE` path as a **positional argument**;
-it mounts the containing directory as C: and runs the executable automatically.
-This is preferable to quoting `MOUNT` inside repeated `-c` arguments.
-
-From PowerShell after rebuilding the latest branch, set the environment variable
-and run your compiled DOSBox with an absolute `MK2.EXE` path:
+### Run this experiment
 
 ```powershell
-$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_40000.csv"
-& 'C:\Users\Usuario\Documents\dosbox-staging\build\release-windows\dosbox.exe' --noautoexec --set 'cpu_cycles_protected=40000' 'D:\GoG\Mortal Kombat 2\MK2.EXE'
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+$env:VCPKG_ROOT = "C:\vcpkg"
+cmake --build --preset=release-windows --parallel 8
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$env:DOSBOX_MK2_SIGNAL_WATCH = "1"
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
+
+& "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
+
+$signalCsv = Join-Path (Split-Path $env:DOSBOX_MK2_TRACE -Parent) ((Split-Path $env:DOSBOX_MK2_TRACE -LeafBase) + "_signal.csv")
+Test-Path "$signalCsv"
+python scripts/analyze_mk2_signal_trace.py "$signalCsv"
+Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
 ```
 
-Adjust the actual executable locations. The destination directory must exist.
-If the CSV has only the header or unexpectedly few rows, compare the emitted
-`window_host_ms` and `window_emulated_ms` values, and ensure the executable
-was rebuilt with the latest `mk2-timing-research` commits.
-, '_guest_code.csv'
-Test-Path "$codeCsv"
-python scripts/extract_mk2_guest_code.py "$codeCsv"
-```
-
-The Python stdlib script writes private 64-byte `.bin` files next to
-the CSV and prints optional `ndisasm` (NASM) and GNU `objdump`
-commands, with guest EIP address origins. Inspect the control flow
-around the wait loop and port read and confirm calls/branches; never
-assume this output establishes the simulation frequency. The snapshots
-are **in-memory guest code**, not MK2.EXE raw file offsets.
-
-**Status:** This targeted code-byte snapshot modification is
-**committed but has not yet been compiled or runtime-validated** on
-the user's Windows system. The previous seven CSV probes have been run
-successfully. If the new CSV is empty, check that the game ran beyond
-30 seconds of emulated time and that the compiled binary contains the
-new branch head.
+Run at least 60 seconds of *emulated* game time with active combat
+during part of seconds 30–150. Share `*_signal.csv` and the
+analyzer's stdout; no full game EXE or large graphical CSVs
+are needed for this stage. Empty/header-only output means we have
+not yet found a matched producer event; check `core=normal`,
+the requested environment variable, and the sampled consumer
+addresses before making conclusions.
 
 ## Source hooks
 
@@ -724,6 +712,9 @@ new branch head.
 - `src/hardware/mk2_guest_probe.h`: opt-in CPU register/CS:EIP samples at IRQ0, VGA status reads, write-burst starts and scheduler ticks (`_guest.csv`).
 - `scripts/analyze_mk2_guest_trace.py`: offline code-location clustering and event summaries (Python standard library only).
 - `scripts/extract_mk2_guest_code.py`: turn locally captured 64-byte code snapshots into private binaries; do not commit generated code data.
+- `src/hardware/mk2_signal_probe.h`: normal-core, DS-resolved writer watchpoint with `_signal.csv` output.
+- `src/cpu/paging.h`: opt-in guarded checks around ordinary guest RAM stores.
+- `scripts/analyze_mk2_signal_trace.py`: compare producer and consumer events without assuming gameplay tick cadence.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
