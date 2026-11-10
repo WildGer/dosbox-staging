@@ -80,6 +80,7 @@ public:
         }
         if (tick % 1000u == 0) {
             Flush();
+            FlushCode();
         }
     }
 
@@ -117,6 +118,7 @@ private:
     }};
     struct CodeSnapshot {
         bool captured = false;
+        bool written = false;
         double emulated_ms = 0.0;
         uint16_t selector = 0;
         uint32_t cs_base = 0;
@@ -266,8 +268,8 @@ private:
             return;
         }
         for (std::size_t i = 0; i < Sites.size(); ++i) {
-            const auto& snapshot = code_snapshots[i];
-            if (!snapshot.captured) {
+            auto& snapshot = code_snapshots[i];
+            if (!snapshot.captured || snapshot.written) {
                 continue;
             }
             code_output << Sites[i].label << ','
@@ -282,6 +284,7 @@ private:
                 code_output << std::setw(2) << static_cast<unsigned>(byte);
             }
             code_output << std::dec << std::setfill(' ') << '\n';
+            snapshot.written = true;
         }
         code_output.flush();
     }
