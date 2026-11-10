@@ -943,6 +943,96 @@ on callback frequency alone.
 committed but not yet compiled/runtime-validated on Windows.
 It must not be used for host FPS benchmarks.
 
+### New 18:21 capture: 14 callbacks decoded; sample candidate object state next
+
+The user uploaded the complete twelve-stream
+`mk2_normal_40000_20261110_182156` capture,
+including all **14 private 256-byte callback code
+slices**. The local x86 disassembly now confirms:
+
+- `0x2133B5` reads two dynamic object pointers from
+  `DS:[0x2B5FC2]` / `DS:[0x2B6146]` and invokes
+  `0x21374A` once for each object.
+- `0x22047D` compares signed WORD values from
+  `[object+0x1A]` for both objects, calculates the
+  midpoint of the two values, and checks global
+  position bounds. This suggests positional/camera
+  or framing work but **does not prove physics**.
+- The earlier phase callback `0x2239B2` reads
+  a masked bitfield from the IRQ producer's
+  shared pointer `DS:[DS:[0x27177C]+0x20]`
+  and updates its previous/current input-state fields.
+- The user-provided `_signal_code.csv` now proves
+  IRQ0's real-mode interrupt vector is
+  **`09B0:0000`**, with the work-counter
+  producer inside that segment at `09B0:08AF`.
+
+The newest fork commit extends the **same opt-in**
+`*_dispatch.csv` with 8 observation columns:
+`object_a_valid`, `object_a_pointer`,
+`object_a_field_1a`, `object_a_field_1e`,
+and equivalent fields for candidate object B.
+Each is sampled **before the dispatch** using
+the *actual DS base*, only during the 30–150s
+diagnostic window. The fields are 16-bit and
+we use signed integers, but their semantics
+and the structures' player identities
+are not established yet.
+
+The first 14 callback entry code samples remain
+in `*_dispatch_code.csv`. It will now also
+capture 8 private, one-time **helper candidates**
+(including **`0x21374A`** and `0x2136F6`)
+with `helper_candidate_` prefixes. A helper
+snapshot proves that its code is present in
+guest memory, not that the helper actually ran.
+
+### Run next object-field timing comparison
+
+Rebuild branch `mk2-timing-research` and
+run the existing PowerShell launcher with:
+`core=normal`, `cpu_cycles_protected=40000`,
+`DOSBOX_MK2_TRACE=<unique CSV path>`
+and `DOSBOX_MK2_SIGNAL_WATCH=1`.
+
+The same run produces `*_dispatch.csv`
+and `*_dispatch_code.csv`.
+
+```powershell
+# Run from the repository root after DOSBox exits.
+$folder = "$env:USERPROFILE\Documents\MK2Timing"
+$dispatch = Get-ChildItem $folder -Filter "*_dispatch.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+$code = Get-ChildItem $folder -Filter "*_dispatch_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $dispatch) {
+    python scripts/analyze_mk2_dispatch_trace.py "$($dispatch.FullName)"
+    python scripts/analyze_mk2_object_trace.py "$($dispatch.FullName)"
+}
+if ($null -ne $code) {
+    python scripts/extract_mk2_guest_code.py "$($code.FullName)"
+}
+```
+
+The new object analyzer requires a **NEW**
+`_dispatch.csv`: it explicitly refuses older
+traces missing the 8 object-state columns.
+It reports object field-change intervals
+and which callback was dispatched immediately
+before the change was first observed, **not
+the actual store instruction EIP**.
+A stationary object may show zero changes
+even while its logic is running.
+
+**Status:** object-state sampler and helper
+capture have been committed but still need
+Windows compilation and runtime validation.
+No timing controls, guest memory, or MK2
+executable are modified.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -964,6 +1054,8 @@ It must not be used for host FPS benchmarks.
 - `src/cpu/core_normal.cpp` and `src/hardware/mk2_signal_probe.h`: targeted read-only capture at instruction `0180:00205531` for the delayed-task indirect jump (`_dispatch.csv`).
 - `scripts/analyze_mk2_dispatch_trace.py`: group callback destinations and task recurrence in emulated time.
 - `src/hardware/mk2_signal_probe.h`: opt-in, one-time 256-byte private callback snapshots at 14 selected dispatched EIPs (`_dispatch_code.csv`).
+- `scripts/analyze_mk2_object_trace.py`: analyze candidate object +0x1A/+0x1E field deltas sampled immediately before each timed-task dispatch.
+- `src/hardware/mk2_signal_probe.h`: add eight helper-candidate private snippets and candidate object fields to the same opt-in diagnostic streams.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
