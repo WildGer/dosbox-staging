@@ -92,6 +92,38 @@ private:
         Clock10ms,
     };
 
+    // Fixed, tiny samples of the user's OWN executable as it is mapped
+    // into guest memory. They are written only to a local trace alongside
+    // the other files, NEVER embedded in this repository.
+    struct CodeSite {
+        const char* label;
+        uint32_t exact_eip;
+        uint8_t event_kind;
+    };
+    static constexpr std::size_t CodeBytes = 64;
+    static constexpr std::array<CodeSite, 6> Sites = {{
+            {"irq_wait_loop", 0x00205489u,
+             static_cast<uint8_t>(Event::Irq0Pre)},
+            {"vga_3da_poll", 0x002196d5u,
+             static_cast<uint8_t>(Event::StatusSample)},
+            {"vram_draw_479a", 0x0020479au,
+             static_cast<uint8_t>(Event::VramWrite)},
+            {"vram_draw_461a", 0x0020461au,
+             static_cast<uint8_t>(Event::VramWrite)},
+            {"vram_draw_42fc", 0x002042fcu,
+             static_cast<uint8_t>(Event::VramWrite)},
+            {"periodic_c81e", 0x0020c81eu,
+             static_cast<uint8_t>(Event::Clock10ms)},
+    }};
+    struct CodeSnapshot {
+        bool captured = false;
+        double emulated_ms = 0.0;
+        uint16_t selector = 0;
+        uint32_t cs_base = 0;
+        uint32_t observed_eip = 0;
+        std::array<uint8_t, CodeBytes> bytes = {};
+    };
+
     struct Sample {
         double emulated_ms = 0;
         uint32_t cs_base = 0;
@@ -139,10 +171,24 @@ private:
         output << "sample_index,emulated_ms,event,cs,cs_base,eip,"
                   "linear_cs_eip,protected_mode,cpl,vga_status,"
                   "eax,ebx,ecx,edx,esi,edi,ebp,esp\n";
+        // Separate local code snapshot CSV; it remains empty (header only)
+        // until a known guest code site is actually encountered.
+        const auto code_path = trace.substr(0, cut) + "_guest_code" +
+                               (cut < trace.size() ? trace.substr(cut)
+                                                  : ".csv");
+        code_output.open(code_path, std::ios::out | std::ios::trunc);
+        if (code_output.is_open()) {
+            code_output << "site,emulated_ms,cs,cs_base,observed_eip,"
+                           "snapshot_start,bytes_hex\n";
+        }
         enabled = true;
     }
 
-    ~Mk2GuestProbe() { Flush(); }
+    ~Mk2GuestProbe()
+    {
+        Flush();
+        FlushCode();
+    }
 
     bool InWindow(const double emulated_ms) const
     {
@@ -172,6 +218,72 @@ private:
         sample.edi = reg_edi;
         sample.ebp = reg_ebp;
         sample.esp = reg_esp;
+        MaybeCaptureCode(sample);
+    }
+
+    // Match locations found independently in both dynamic and normal
+    // CPU-core samples. Use only a 64-byte snippet starting at an
+    // interpreter-confirmed EIP. No CPU instruction hook or guest writes.
+    // Captures are read via regular DOSBox guest linear memory paging.
+    void MaybeCaptureCode(const Sample& sample)
+    {
+        if (!code_output.is_open() || !sample.protected_mode ||
+            sample.cs != 0x0180u || sample.cs_base != 0) {
+            return;
+        }
+        for (std::size_t i = 0; i < Sites.size(); ++i) {
+            const auto& site = Sites[i];
+            auto& snapshot = code_snapshots[i];
+            if (snapshot.captured || sample.kind != site.event_kind) {
+                continue;
+            }
+
+            // Normal core shows four tightly spaced interrupt PCs.
+            // A code snapshot near the first one is sufficient.
+            const bool match = i == 0
+                    ? sample.eip >= site.exact_eip &&
+                      sample.eip <= site.exact_eip + 11u
+                    : sample.eip == site.exact_eip;
+            if (!match) {
+                continue;
+            }
+            snapshot.emulated_ms = sample.emulated_ms;
+            snapshot.selector = sample.cs;
+            snapshot.cs_base = sample.cs_base;
+            snapshot.observed_eip = sample.eip;
+            for (std::size_t b = 0; b < CodeBytes; ++b) {
+                snapshot.bytes[b] = mem_readb(
+                        static_cast<PhysPt>(sample.cs_base +
+                                            site.exact_eip + b));
+            }
+            snapshot.captured = true;
+        }
+    }
+
+    void FlushCode()
+    {
+        if (!code_output.is_open()) {
+            return;
+        }
+        for (std::size_t i = 0; i < Sites.size(); ++i) {
+            const auto& snapshot = code_snapshots[i];
+            if (!snapshot.captured) {
+                continue;
+            }
+            code_output << Sites[i].label << ','
+                        << std::fixed << std::setprecision(6)
+                        << snapshot.emulated_ms << ','
+                        << snapshot.selector << ','
+                        << snapshot.cs_base << ','
+                        << snapshot.observed_eip << ','
+                        << Sites[i].exact_eip << ','
+                        << std::hex << std::setfill('0');
+            for (const auto byte : snapshot.bytes) {
+                code_output << std::setw(2) << static_cast<unsigned>(byte);
+            }
+            code_output << std::dec << std::setfill(' ') << '\n';
+        }
+        code_output.flush();
     }
 
     static const char* Name(const uint8_t event)
@@ -222,7 +334,9 @@ private:
     uint64_t written_count = 0;
     std::size_t buffer_count = 0;
     std::ofstream output = {};
+    std::ofstream code_output = {};
     std::array<Sample, BufferSize> buffer = {};
+    std::array<CodeSnapshot, Sites.size()> code_snapshots = {};
 };
 
 #endif // DOSBOX_MK2_GUEST_PROBE_H
