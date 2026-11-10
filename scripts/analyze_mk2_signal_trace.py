@@ -42,9 +42,10 @@ def main() -> None:
     locations = Counter()
     pointers = Counter()
     targets = Counter()
-    writer_changes: dict[tuple[int, int, int], list[float]] = defaultdict(list)
-    rising = []
-    clearing = []
+    writer_changes: dict[tuple[str, int, int, int], list[float]] = defaultdict(list)
+    transitions: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     for row in events:
         event = row["event"]
         by_type[event] += 1
@@ -53,15 +54,16 @@ def main() -> None:
         pointers[ptr] += 1
         targets[target] += 1
         old, new = int(row["before"]), int(row["after"])
-        if event.startswith("signal"):
+        if event.startswith("signal") or event == "opcode_transition":
             pc = (int(row["writer_cs"]), int(row["writer_cs_base"]),
                   int(row["writer_eip"]))
             locations[(event, *pc)] += 1
             if old == 0 and new != 0:
-                rising.append(float(row["emulated_ms"]))
-                writer_changes[pc].append(float(row["emulated_ms"]))
+                t = float(row["emulated_ms"])
+                transitions[event]["rise"].append(t)
+                writer_changes[(event, *pc)].append(t)
             elif old != 0 and new == 0:
-                clearing.append(float(row["emulated_ms"]))
+                transitions[event]["clear"].append(float(row["emulated_ms"]))
 
     print("\nEvent counts:")
     for event, count in by_type.most_common():
@@ -77,24 +79,34 @@ def main() -> None:
               f"EIP=0x{eip:08X}  hits={hits:,}")
     def diffs(times: list[float]) -> list[float]:
         return [t2 - t1 for t1, t2 in zip(times, times[1:]) if t2 > t1]
-    print(f"\nObserved 0 -> nonzero signal transitions: {len(rising):,}; "
-          f"spacing {stat(diffs(rising))}")
-    print(f"Observed nonzero -> 0 clears: {len(clearing):,}; "
-          f"spacing {stat(diffs(clearing))}")
-    print("\nWriter PCs producing 0 -> nonzero transitions:")
-    for (cs, cs_base, eip), t in sorted(writer_changes.items(),
-                                        key=lambda item: -len(item[1]))[:args.top]:
-        print(f"  {cs:04X}:{eip:08X} base=0x{cs_base:08X}: "
+    print("\nSignal transitions, by observation mechanism:")
+    for event in ("signal_write", "signal_same", "opcode_transition"):
+        rise = transitions[event]["rise"]
+        clear = transitions[event]["clear"]
+        print(f"  {event}: 0 -> nonzero={len(rise):,} "
+              f"({stat(diffs(rise))}); nonzero -> 0={len(clear):,} "
+              f"({stat(diffs(clear))})")
+    print("  NOTE: opcode_transition can duplicate a signal_write event. "
+          "Do not add counts from different mechanisms.")
+    print("\nWriter PCs / preceding interpreted opcodes for 0 -> nonzero:")
+    for (event, cs, cs_base, eip), t in sorted(
+            writer_changes.items(), key=lambda item: -len(item[1])
+            )[:args.top]:
+        print(f"  {event:<18} {cs:04X}:{eip:08X} base=0x{cs_base:08X}: "
               f"{len(t):,} transitions; {stat(diffs(t))}")
 
     print("\nCAVEATS")
     print("- Event timestamps are guest emulated milliseconds.")
     print("- The watch resolves DS at the interrupted consumer; different "
-          "DS values, pointer changes and writes outside normal core "
-          "may be missed.")
-    print("- Only monitored normal-core memory write helpers are covered. "
-          "This is not an instruction-by-instruction trace or exhaustive "
-          "watchpoint for dynamic/direct native writes.")
+          "DS values, pointer changes and aliased mappings may be missed.")
+    print("- The store hooks now accept all CPU modes while the watch is "
+          "resolved. Some direct/native memory writes still bypass them.")
+    print("- opcode_transition is a separate bounded normal-core "
+          "instruction-boundary observation (~1 IRQ window/second). The "
+          "reported EIP is the preceding opcode, not necessarily a direct "
+          "store instruction if a host callback changed memory.")
+    print("- Missing positives in the store log despite many detected "
+          "clears may indicate an unobserved store path or memory alias.")
     print("- A 0->nonzero write can be a work/clock signal; it is NOT "
           "proof that a combat simulation tick occurred.")
     print("- Verify any candidate producer EIP with disassembly and a "
