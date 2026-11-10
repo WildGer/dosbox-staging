@@ -692,8 +692,126 @@ preferably at 40,000 cycles:
 The findings section and handoff should be updated again once an actual
 normal-core or disassembly check is performed.
 
+## Normal-core verification and next local guest code snapshots (2026-11-10)
+
+**Evidence source:** User pasted the output of
+`scripts/analyze_mk2_guest_trace.py` for
+`mk2_normal_40000_20261110_134308_guest.csv` from a Windows MK2 run
+using `core=normal`. This is a different run from the earlier
+`mk2_40000_20261110_133415_guest.csv` dynamic/auto-core capture.
+**Neither raw CSV nor game binaries are committed.** Numbers below are
+the analyzer's output, not direct examination of instruction bytes.
+
+### Dynamic-core vs normal-core results
+
+| Statistic | Dynamic / auto | Normal interpreter |
+|---|---:|---:|
+| Guest context samples | 30,385 | **29,519** |
+| Protected-mode samples | 30,328 | **29,446** |
+| IRQ0 pre-dispatch samples | 7,207 | **7,076** |
+| IRQ0 pre-dispatch in EIP page `00205400` | 7,097 (98.5%) | **6,963 (98.4%)** |
+| VGA 3DAh status rising samples at `0180:002196D5` | 1,473 / 1,473 | **1,531 / 1,531** |
+| VGA 3DAh periodic samples at `0180:002196D5` | 5,029 / 5,029 | **5,402 / 5,402** |
+| First-intercepted-VRAM-write samples | 4,676 | **3,726** |
+| Independent 10-ms samples | 12,000 | **11,784** |
+
+The four exact `core=normal` EIP positions within the interrupted
+CPU's most common code page are:
+
+| EIP | Normal-core IRQ0 pre-dispatch hits |
+|---|---:|
+| `0180:00205489` | 1,774 |
+| `0180:0020548F` | 1,670 |
+| `0180:00205492` | 1,766 |
+| `0180:00205494` | 1,753 |
+| **Total** | **6,963** |
+
+The four EIPs are clustered within 11 guest bytes, with similar
+occurrence counts, supporting an **extremely tight, frequently
+interrupted execution loop** or short cycle of instructions. A direct
+instruction decode remains necessary to determine its branch
+conditions and whether it is idle, polling, game-state or input-related.
+It is **not yet identified as the simulation loop**.
+
+The VGA polling address `0180:002196D5` is identical in both runs,
+in *all* sampled 3DAh read events. This is a strong candidate for an
+I/O read instruction or polling routine. The median time between
+recorded status-rising observations remains **99.876 ms**, but
+the 1,531 samples over ~117.77 seconds cannot be reduced to “10 Hz”
+without examining all interval gaps and how often the guest actually
+polls. The VGA hardware clock remains ~70.09 Hz.
+
+The normal interpreter's leading write-site samples include
+`0180:0020479A` (517), `0180:0020461A` (514),
+`0180:002042FC` (297), `0180:002045A2` (154),
+and `0180:002045EA` (141), all inside or adjacent to the
+`00204200–002049FF` graphics code span observed earlier. Their
+intra-run frequency is **not** a simulation-tick frequency.
+
+The normal-core 10-ms scheduler samples still spend 66.2% of samples
+in page `00205400`. Other sampled pages include `0020C800`,
+`0020A300`, `0020A400`, and `00208700`, with no confirmed
+function identity. Normal-core samples are for *code location
+validation*, not FPS or real-time speed comparisons.
+
+### New targeted experiment: small in-guest code snapshots
+
+**Implemented on branch, not yet Windows compiled/runtime-validated.**
+
+The modified `src/hardware/mk2_guest_probe.h` now records **at most
+one 64-byte code snapshot per verified site**, starting at the
+observed protected-mode guest EIP. Candidate sites:
+
+| Label | Expected guest EIP |
+|---|---|
+| `irq_wait_loop` | `00205489` (trigger from IRQ0 pre-dispatch at 5489/548F/5492/5494) |
+| `vga_3da_poll` | `002196D5` |
+| `vram_draw_479a` | `0020479A` |
+| `vram_draw_461a` | `0020461A` |
+| `vram_draw_42fc` | `002042FC` |
+| `periodic_c81e` | `0020C81E` |
+
+When enabled by the existing `DOSBOX_MK2_TRACE` variable, the same
+guest CPU context hooks now take these tiny read-only snapshots from
+the **running user's own DOS environment** (selector 0180, CS base 0,
+protected mode). They are buffered and flushed at most every emulated
+second to a local **`_guest_code.csv`**. No game bytes are written
+to the repository or distributed by this code change. The CSV may
+contain copyrighted byte sequences from the user's own MK2.EXE:
+**keep it private and do not commit it or the extracted .bin files**.
+
+An additional local utility
+`scripts/extract_mk2_guest_code.py` extracts each 64-byte hex field
+to a private per-site .bin and prints
+`ndisasm -b 32 -o <guest EIP> ...` and `objdump -D -b binary -m i386
+-M intel --adjust-vma=<guest EIP> ...` examples. The starting EIP is
+intended to be an instruction boundary in the normal interpreter;
+disassembling earlier arbitrary bytes can yield misleading offsets.
+Use `core=normal` for the first snapshot run; after validating the
+instruction stream, dynamic-core runs can be compared.
+
+**Limitation:** The read-only code snapshot is taken inside an
+emulator event callback after matching an observed EIP. It describes
+the guest memory contents at that event, not the original file layout
+on disk. The selected instruction could be in a DOS extender, a
+shared routine, or loaded/relocated code. Disassembly must interpret
+calling context, branches and reference addresses; these bytes alone
+do **not** prove a real simulation tick. The new capture has not been
+compiled or runtime-tested in the user's Windows build.
+
+### Next action
+
+Build the current branch, run MK2 with **`core=normal`** and
+`DOSBOX_MK2_TRACE` enabled during live gameplay after 30s emulated,
+and inspect `*_guest_code.csv`. Some of the six candidate sites might
+not be encountered during a particular short run, so fewer than six
+rows are valid and not an automatic failure. Use the extractor locally
+to produce short disassemblies, then **verify the loop logic and call
+relationships before adding a game-state tick counter**. No changes
+to PIT, VGA, IRQs, guest program or game assets are needed.
+
 ## Context to restore in a new chat
 
-> Continue MK2 DOS timing study in GitHub repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, documents `docs/mk2-timing-research.md` and `docs/mk2-timing-research-findings-2026-11-09.md`. Six VGA-oriented CSV probes were Windows-validated; the sixth line trace showed 70,000/70,000 VGA output-to-renderer-cache hash agreement, and explained 837 formerly mysterious changes as compatible with prior-scanout guest VRAM writes. Seventh opt-in `_guest.csv` probe was built and supplied as analyzer stdout `mk2_40000_20261110_133415_guest.csv`: 30,385 context samples, ~120 s. 7,097/7,207 pre-IRQ0 samples at `0180:00205489`; ALL 1,473 status-rising and ALL 5,029 status-sampling events at `0180:002196D5`, median VSYNC-rising separation 99.876 ms; 4,676 VRAM first-write context samples concentrated in `0180:00204200–002049FF`. Other periodic PCs include `0180:0020C800`, `0180:00208700`. These are candidate CPU locations **NOT simulation ticks**. DOSBox Staging `core=auto` uses dynamic core in protected mode; callback EIPs may be stale/block-level. Next: short `core=normal` diagnostic capture to validate location precision, then disassemble guest code with correct DOS extender mapping; identify a real game-state update routine before counting simulation ticks. Do not alter PIT (60.052 Hz), VGA (70.09 Hz), MK2 binaries or gameplay timing. All game assets remain private; raw CSVs are not committed to GitHub.
+> Continue MK2 DOS timing investigation in repo `WildGer/dosbox-staging`, branch `mk2-timing-research`, using this findings report and `docs/mk2-timing-research.md`. PIT ~60.052 Hz, VGA ~70.09 Hz, recurring source-frame visual cadence 3-1-1-2. Six visual/VGA probes were validated and found 70,000 matching VGA-to-source-cache line hashes, and frames that can change because writes during scanout N are first read in N+1. Seventh guest-context probe captured `mk2_40000_20261110_133415_guest.csv` (dynamic/auto), and `mk2_normal_40000_20261110_134308_guest.csv` (normal). In normal, 6,963/7,076 pre-IRQ0 samples are in page `00205400`, distributed almost equally among exact `CS:EIP=0180:00205489/8F/92/94` (possible tight loop). All 1,531 3DAh sync rising and 5,402 sampled port reads show `0180:002196D5` (candidate polling instruction). VRAM first-write samples are concentrated in code pages `00204200–002049FF`. None of these has been demonstrated to be an MK2 simulation tick. **NEW untested branch change:** a small, one-time, 64-byte guest code snapshot probe for six known locations, saved LOCALLY to `*_guest_code.csv` when the ordinary `DOSBOX_MK2_TRACE` is enabled. Helper `scripts/extract_mk2_guest_code.py` writes local .bin snippets and prints ndisasm/objdump commands. Next: compile, run a short core=normal combat trace, inspect snapshot CSV, privately disassemble candidate code, verify actual loop/state changes before counting ticks. Do not put guest MK2 code bytes or assets in the repository or modify PIT/VGA/guest binary timing.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload all seven CSVs from the next run. Maintain this document when new evidence changes a hypothesis.
