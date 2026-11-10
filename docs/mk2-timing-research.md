@@ -814,6 +814,84 @@ handler hypothesis, but instruction-level disassembly and
 call-chain tracing are still needed to establish what function
 actually advances game logic.
 
+### NEW: observe delayed-task callback destinations (`*_dispatch.csv`)
+
+**Based on actual private MK2 instruction bytes**, the continuation
+`0180:002054FE` traverses a list of task nodes via
+`ESI = DWORD [ESI]`, decrements `WORD [ESI+6]`,
+skips nodes with a positive remaining countdown, then
+copies task context and jumps at **`0180:00205531`**
+using `JMP DWORD [ESI+0x1C]`. This supports a timer-driven
+delayed-task dispatcher, **not yet a confirmed simulation tick**.
+
+The updated, **default-off** `core=normal` instrumentation
+samples *only* the decoded instruction `0180:00205531`
+while **both** `DOSBOX_MK2_TRACE` and
+`DOSBOX_MK2_SIGNAL_WATCH=1` are enabled. Its new companion
+output is **`*_dispatch.csv`**. Each `dispatch` event contains:
+
+- `emulated_ms`: guest PIC time before the indirect jump
+- `cs, ds, ds_base`: execution and task-data segments
+- `task_offset` (ESI), `task_linear`, `next_offset`
+- `remaining`: signed 16-bit countdown **after** decrement
+- `handler_eip`: `DWORD DS:[ESI+0x1C]`, the actual near-jump
+  callback target within CS 0180
+- `ebp, edi`: restored task context registers
+- `dropped_count`: diagnostic of any callback buffer overflows
+  (explicit `overflow` rows)
+
+It captures **emulated seconds 30–150**, buffers at most 4096
+dispatches per emulated second and flushes once per second,
+reporting dropped rows rather than silently undercounting.
+This is not a per-instruction logger: it checks a known EIP
+with a cheap conditional during normal interpretation, and
+does not alter guest memory, PIT, IRQ schedule, VGA timing
+or MK2's executable.
+
+### Run, extract, analyze
+
+Update/compile the fork and repeat the already working
+normal-core 40,000-cycle signal-watch launcher. The same run
+will produce both `*_signal.csv` and `*_dispatch.csv`:
+
+```powershell
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+cmake --build --preset=release-windows --parallel 8
+
+# Use your existing MK2 launch script with:
+# $env:DOSBOX_MK2_SIGNAL_WATCH = "1"
+# $env:DOSBOX_MK2_TRACE = a unique MK2Timing .csv file
+# --set "core=normal" --set "cpu_cycles_protected=40000"
+
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_dispatch.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $latest) {
+    Write-Host "No _dispatch.csv: check build and opt-in flags"
+} else {
+    python scripts/analyze_mk2_dispatch_trace.py "$($latest.FullName)"
+}
+```
+
+This avoids depending on `DOSBOX_MK2_TRACE` remaining set
+after a launcher cleans environment variables, and does not
+use PowerShell-specific `-LeafBase`.
+
+**Validation status:** The newly added dispatcher diagnostic
+has **not yet been compiled or tested on Windows**.
+The producer and task-dispatcher instruction *disassemblies*
+have been verified from the user's private binaries.
+
+**Next interpretation step:** Group callback destinations
+by `handler_eip` across gameplay and menus; determine which
+individual callback actually updates character positions,
+animation frames, inputs or combat collision before interpreting
+its recurrence as MK2's game simulation rate. Do not assume
+every 60-Hz counter update corresponds to one simulation step.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -832,6 +910,8 @@ actually advances game logic.
 - `src/hardware/mk2_signal_probe.h`: normal-core, DS-resolved writer watchpoint with `_signal.csv` output.
 - `src/cpu/paging.h`: opt-in guarded checks around ordinary guest RAM stores.
 - `scripts/analyze_mk2_signal_trace.py`: compare producer and consumer events without assuming gameplay tick cadence.
+- `src/cpu/core_normal.cpp` and `src/hardware/mk2_signal_probe.h`: targeted read-only capture at instruction `0180:00205531` for the delayed-task indirect jump (`_dispatch.csv`).
+- `scripts/analyze_mk2_dispatch_trace.py`: group callback destinations and task recurrence in emulated time.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
 - `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
