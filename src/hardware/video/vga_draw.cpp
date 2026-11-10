@@ -19,6 +19,7 @@
 #include "hardware/mk2_vram_probe.h"
 #include "hardware/mk2_vga_regs_probe.h"
 #include "hardware/mk2_scanmem_probe.h"
+#include "hardware/mk2_scanline_probe.h"
 #include "hardware/pic.h"
 #include "hardware/video/reelmagic/reelmagic.h"
 #include "ints/int10.h"
@@ -1250,8 +1251,12 @@ static void VGA_DrawSingleLine([[maybe_unused]] uint32_t dummy)
 		vga_draw_blank_line();
 
 	} else {
-		// Otherwise draw the actual line
+		// Sample the true line address and its source/palette state
+		// immediately before VGA transforms it to the RGB scanline.
+		Mk2ScanlineProbe::Get().OnBeforeLine(
+		        vga.draw.lines_done, vga.draw.address);
 		uint8_t* data = VGA_DrawLine(vga.draw.address, vga.draw.address_line);
+		Mk2ScanlineProbe::Get().OnAfterLine(data);
 		ReelMagic_RENDER_DrawLine(data);
 	}
 
@@ -1325,7 +1330,10 @@ static void VGA_DrawEGASingleLine([[maybe_unused]] uint32_t dummy)
 static void VGA_DrawPart(uint32_t lines)
 {
 	while (lines--) {
+		Mk2ScanlineProbe::Get().OnBeforeLine(
+		        vga.draw.lines_done, vga.draw.address);
 		uint8_t* data = VGA_DrawLine(vga.draw.address, vga.draw.address_line);
+		Mk2ScanlineProbe::Get().OnAfterLine(data);
 		ReelMagic_RENDER_DrawLine(data);
 
 		++vga.draw.address_line;
@@ -1651,7 +1659,9 @@ static void VGA_VerticalTimer(uint32_t /*val*/)
 
 	// The source scanout has started and its VGA draw-source selection is
 	// complete. Read backing memory before the scheduled scanlines execute.
-	Mk2ScanmemProbe::Get().OnBegin(PIC_FullIndex());
+	const auto sample_begin_ms = PIC_FullIndex();
+	Mk2ScanmemProbe::Get().OnBegin(sample_begin_ms);
+	Mk2ScanlineProbe::Get().OnFrameBegin(sample_begin_ms);
 }
 
 void VGA_CheckScanLength(void)
