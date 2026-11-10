@@ -67,6 +67,7 @@ public:
         }
         auto& row = rows[line_number];
         row.valid = true;
+        row.output_ready = false;
         row.line = line_number;
         row.address = address;
         row.masked_offset = address & vga.draw.linear_mask;
@@ -239,7 +240,7 @@ private:
     bool active = false;
     bool pending = false;
     uint32_t pending_line = 0;
-    uint32_t last_sample_second = UINT32_MAX;
+    uint32_t last_sample_second = ~uint32_t{0};
     double frame_begin_ms = 0.0;
     uint64_t sampled_frames = 0;
     uint64_t written_lines = 0;
