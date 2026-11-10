@@ -1515,8 +1515,195 @@ then inspect the callback code to determine which
 tasks actually update fighter state; do NOT equate
 60-Hz task dispatches with 60-Hz combat simulation.
 
+## 2026-11-10 18:21: all 12 CSVs + 14 callback instruction snapshots analyzed
+
+**Source basis:** User uploaded all twelve CSV files with
+`mk2_normal_40000_20261110_182156` prefix,
+including `_dispatch_code.csv`, `_signal_code.csv`,
+`_dispatch.csv`, `_signal.csv`, `_frames.csv`,
+`_scanmem.csv`, `_lines.csv`, `_guest.csv`,
+`_guest_code.csv`, `_regs.csv`, `_vram.csv`,
+and the main timing CSV. We actually parsed their contents.
+The 14 callback snapshots were all 256 bytes of actual
+guest 32-bit x86, disassembled locally with GNU objdump.
+**No binary bytes or disassembly containing game code
+were committed to GitHub**; the local private disassembly
+and the analysis report were generated separately for
+the user.
+
+### Timer IRQ0 chain — vector now definitively grounded
+
+The user finally supplied `_signal_code.csv` metadata
+(not just earlier .bin files). All three rows report the
+**real-mode IRQ0 IVT vector `09B0:0000`** (segment
+2480 decimal, offset 0), while the producer executes at
+**CS `09B0`, EIP `08AF`, CS base `0x9B00`,
+16-bit code**. This establishes the producer is in
+the same segment as the guest's IRQ0 handler entry;
+the actual call/branch chain from the IVT's offset zero
+to offset 0x8AF has **not** yet been decoded.
+
+The producer incremented the 32-bit pending timer counter
+at `DS:0x24..27` in previously decoded snippets.
+The protected-mode consumer at `0180:2054AD` clears
+the same linear `0x9B24` location.
+
+### This run's counts
+
+| Source | Observed |
+|---|---:|
+| `_dispatch.csv` normal-core scheduled callback events | **19,652** |
+| Emulated dispatcher window | **30.015–92.993 s** |
+| Distinct ESI task nodes | **29** |
+| Distinct destination EIPs | **127** |
+| `_dispatch.csv` overflow events | **0** |
+| Direct positive timer producer events | **3,783** |
+| Direct work-counter clears | **3,773** |
+| Independent bounded opcode transition observations | **63** |
+| VGA scanouts `_frames.csv` | **6,515** |
+| Visible image changes `_frames.csv` | **2,808** |
+| Repeated visible images | **3,707** |
+| `_frames` / `_scanmem` hash matches | **6,515 / 6,515** |
+| VGA output/cache line sample matches | **42,000 / 42,000** |
+
+Different callback target totals versus the previous
+17:48 capture (**126 targets, 20 nodes**) reflect
+the *different gameplay phases* in each run. They
+do not imply that MK2's native logic clock changed.
+The main task nodes `0x276A8C` and `0x276774`
+still have median dispatcher intervals **16.652 ms**.
+
+New phase-specific observations:
+
+- At emulated **30.015–32.213 s**, the two main
+  nodes run `0x223DFD` and `0x2239B2`
+  respectively, **133 dispatches each**.
+- At emulated **35.260 s**, `0x276A8C` begins
+  the persistent callback `0x2133B5` (**3,466**
+  runs overall). At **35.327 s**, `0x276774`
+  begins `0x22047D` (**3,458** runs).
+- Multiple other entities then appear. In
+  50–60 s there are **29 distinct task nodes**.
+  Unlike the two main nodes, some of these run
+  identical callback EIPs on different objects,
+  explaining why a combined per-callback interval
+  can be misleading.
+- In the signal stream a pending-value accumulation
+  **1→2→...→10** occurs around emulated
+  **35.111–35.244 s**, ending with a single
+  **10→0** clear. As with the earlier capture,
+  this is *not* proof of replaying ten individual
+  game-physics updates.
+
+### Direct 32-bit x86 evidence about callback roles
+
+`0x2133B5` — **priority logic candidate**:
+the routine conditionally decrements DWORD
+`DS:[0x2B62D2]` and loads two object pointers
+from `DS:[0x2B5FC2]` and `DS:[0x2B6146]`.
+It calls **`0x21374A` twice**, first with EAX
+holding one object pointer, then with EAX holding
+the other. It also calls `0x2136F6` and
+performs multiple conditions on state and
+positions. These two callee bodies **were not
+contained in the 256-byte snapshot** and must
+be examined before assigning actual game simulation
+or fighter-update semantics. The repeated
+calls make `0x21374A` an especially valuable
+candidate for a per-object update routine.
+
+`0x22047D` — **position/viewport candidate**:
+reads signed WORD `[EDI+0x1A]` from each
+of those same two global objects, orders the
+values, computes their difference and midpoint
+(`SHR distance,1; ADD lower_position`),
+and checks a global `DS:[0x2C432E]` with
+several positional bounds (`0x50`, `0x3C`,
+`0x117`). This is consistent with midpoint/
+camera tracking or positional framing.
+It does **not** directly prove fighter physics
+integration; do not label it a combat tick.
+
+`0x2239B2` — **strong early-phase input/bitfield
+candidate**: reads `DWORD [DWORD DS:[0x27177C]+0x20]`,
+i.e. a value from the same pointer structure
+used by the 16-bit IRQ producer; selects one
+16-bit half depending on `WORD [ESI+4]`,
+masks `0x1F0`, stores successive states
+at `[ESI+0x6C]` and `[ESI+0x70]`,
+then branches based on button/flag bits.
+This is strong evidence of input/state-edge
+processing, without enough context to identify
+individual button meanings.
+
+`0x223DFD` — tests/updates flags
+`[EDI+0x34]` including bit `0x40` and
+compares `WORD [EDI+0x40]` and state value;
+probably stage/entity-state work but role
+is not yet verified.
+
+`0x22FB73` — branches on bitfield
+masks `8`, `4`, `1`, and `2`
+from helper `0x201739`; the callbacks
+appear on multiple task nodes in this run.
+`0x22FABF` — reads `WORD [EDI+0x1E]`
+and compares against an object/global
+threshold; its **2,812** dispatches were
+spread over many task nodes, suggesting
+per-entity work rather than a sole global
+60-Hz simulation callback. Neither routine's
+exact gameplay meaning is proven.
+
+The 14 `_dispatch_code.csv` rows had full
+256-byte payloads and valid **code_bits=32**.
+Some end mid-instruction or branch outside
+their 256-byte region. Do not treat
+misaligned trailing disassembly as code facts.
+
+### Next experiment already staged in fork, not yet Windows-tested
+
+The current branch's opt-in `OnTaskDispatch()`
+will now read **two dynamic candidate-object
+pointers** `DS:[0x2B5FC2]` and
+`DS:[0x2B6146]` and sample their signed
+WORD fields `+0x1A` and `+0x1E` just
+**before each scheduled callback**. The extra
+8 CSV columns are added to the end of
+`*_dispatch.csv`, leaving legacy analysis
+columns unchanged. New standard-library
+`scripts/analyze_mk2_object_trace.py`
+reports per-object change cadence, pointer
+changes, and the *preceding dispatched callback*
+as a correlation candidate — **not proof of
+which CPU instruction wrote the field**.
+
+The private `*_dispatch_code.csv` will
+also include **8 extra `helper_candidate_...`
+snapshots**, including `0x21374A`,
+`0x2136F6`, `0x201739`, `0x202706`,
+`0x203285`, `0x231EC8`, `0x2054BB`,
+and `0x205673`. These are actual code
+addresses referenced by known MK2 callback
+fragments; capturing code bytes alone
+does not prove the helpers were executed
+during that particular snapshot.
+
+**Next:** Windows compile, repeat the same
+normal core, 40,000 protected cycles,
+`DOSBOX_MK2_TRACE=<unique file>` and
+`DOSBOX_MK2_SIGNAL_WATCH=1` run.
+Inspect `*_dispatch_code.csv` via
+`scripts/extract_mk2_guest_code.py`
+and use `scripts/analyze_mk2_object_trace.py`
+on the new `*_dispatch.csv`.
+To positively attribute coordinate changes
+to a writer, a direct guest memory write
+watchpoint may still be needed. No PIT,
+IRQ, VGA or executable modification is
+part of this experiment.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing investigation in `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read the **2026-11-10 17:48** newest section of this findings document and `docs/mk2-timing-research.md`. User supplied eight actual CSV streams from run `mk2_normal_40000_20261110_174841`; directly analyzed. 17,403 callback dispatches, zero overflow, 20 task nodes, 126 handler target EIPs, all remaining countdowns zero. Two principal nodes `ESI=0x276A8C/0x276774` each normally execute about every 16.652ms (~60Hz); their steady callback entry targets `0x2133B5/0x22047D`, replaced earlier by `0x223DFD/0x2239B2`. In emulated 40-90s, 3,002 signal clears vs 3,001/2,998 primary dispatches. Other nodes at roughly 3,6,8,10 timer-tick intervals. Critical: around t=39.279-39.439s the producer `09B0:08AF` accumulates 10 ticks in a DWORD and consumer `0180:2054AD` clears 10->0; this does NOT prove catch-up processing or a 60Hz game physics tick. VGA ~70.09Hz; 6,652 total scanouts, 2,578 image changes, and 40-90s 3,504 scanouts with 1,934 changes; 6,652 matching frame/scanmem hashes and 42,000 matching sampled lines. **Simulation update rate remains unverified.** NEW UNTESTED CODE PATCH: first-dispatch 256-byte snapshots of 14 prioritized callback EIPs (especially 0x2133B5 and 0x22047D) saved only to local `*_dispatch_code.csv`, extract with `scripts/extract_mk2_guest_code.py`, no copyrighted bytes committed. NEXT: build `mk2-timing-research` Windows, replay original normal-core 40k signal-watch script, privately upload `_dispatch_code.csv` or extracted binaries; disassemble callback targets and trace actual fighter state changes to identify true simulation tick. Do not alter MK2 EXE, PIT or VGA clock.
+> MK2 DOS timing project `WildGer/dosbox-staging` branch `mk2-timing-research`. Read **2026-11-10 18:21: all 12 CSVs + 14 callback instruction snapshots analyzed** in this findings doc. User supplied actual 12 CSVs, including full `_dispatch_code.csv` (14 x 256-byte private 32-bit code snapshots) and `_signal_code.csv`. IRQ0 IVT entry now **confirmed 09B0:0000**, producer **09B0:08AF** in same 16-bit real-mode segment increments work DWORD; protected consumer 0180:2054AD resets. Run 18:21: 19,652 scheduler dispatches across 29 task nodes, 127 callback EIPs, 0 overflow; two main nodes ~60Hz; 6515 VGA scanouts and 2808 visible changes with 6515/6515 frame/scanmem and 42000/42000 line/cache agreement. Pending signal accumulates 10 ticks near 35.11–35.24s during phase change. Real 32-bit disassembly: **0x2133B5** handles both global object pointers 0x2B5FC2 and 0x2B6146 via **two CALLs to 0x21374A**, making 0x21374A priority to decode for true object update; **0x22047D** compares WORD fields [obj+1A] from both objects and calculates midpoint/bounds, more likely camera/framing than physics; early **0x2239B2** reads masked bitfield from shared IRQ pointer+0x20, probably input/state processing; **0x22FABF**, **0x22FB73** on many task nodes. None establishes a 60Hz game combat tick. NEW UNTESTED PATCH on fork: extends `*_dispatch.csv` with two candidate object pointers and signed WORD [+1A,+1E] sampled at each dispatch; `scripts/analyze_mk2_object_trace.py` groups observed value changes vs preceding task (correlation only, not proof writer); `*_dispatch_code.csv` additionally captures 8 helper candidates including 0x21374A and 0x2136F6 in private user RAM. NEXT compile, run normal core 40k with `DOSBOX_MK2_TRACE` + `DOSBOX_MK2_SIGNAL_WATCH=1`, upload new `_dispatch.csv` and `_dispatch_code.csv`, inspect helpers and potential actor field change intervals; proceed to direct writer watch if needed. No MK2 code bytes in GitHub; no changes to game memory or PIT/VGA timings.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
