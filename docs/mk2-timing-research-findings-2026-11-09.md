@@ -5,7 +5,7 @@
 **Working platform:** Windows 11, Visual Studio 2026 (CMake `release-windows` preset), ClangCL, vcpkg at `C:\vcpkg`
 **Research date:** 2026-11-09
 **Game:** GOG installation of *Mortal Kombat II*, launched as an external DOS .EXE.
-**Status:** Five telemetry streams have been validated on Windows. A sixth, **sparse per-scanline** probe (`_lines.csv`), has been committed on 2026-11-10 but **has not yet been compiled or runtime validated on Windows**. The immediate research question is to explain 696 changed source images in the previous capture with no observed VRAM writes/DAC commits and no net memory/palette change at scanout boundaries.
+**Status (updated 2026-11-10):** All **six CSV probes** have been built and exercised successfully in Windows. The sixth, sparse per-scanline probe, produced 70,000 verified line comparisons. Every sampled VGA RGB line hash equals its latched renderer source-cache counterpart. In the NEW 2026-11-10 trace, 837 changed source images without contemporaneous observed VRAM writes or DAC commits have a strong, consistent precursor: the *preceding scanout* included observable VRAM changes and VGA writes. In targeted windows, 32/32 such cases have changed source indices at line-read time. This supports next-scanout visibility of earlier VRAM updates, not a renderer-cache fault. Simulation tick cadence remains unmeasured.
 
 ## Scope and non-negotiable constraints
 
@@ -393,8 +393,150 @@ alone requires build/runtime validation. No conclusions about MK2 game
 simulation FPS or a fix to clocks should be made from instrumentation
 until the line-level data are analyzed.
 
+## Follow-up capture 2026-11-10 — six-stream line-level results (**new verified finding**)
+
+The user built DOSBox Staging on Windows at **13:08:33 local time** and
+successfully launched MK2 with **40,000 protected-mode cycles**. Exit code was
+0. Uploaded files all share the prefix
+`mk2_40000_20261110_131108`:
+`.csv`, `_frames.csv`, `_vram.csv`, `_regs.csv`,
+`_scanmem.csv`, `_lines.csv`, plus
+`launch_20261110_131108.txt`.
+**Raw CSVs and game files are not committed to GitHub.**
+
+### Six-stream integrity and coverage
+
+| Measurement | Verified result |
+|---|---:|
+| PIT/VGA summary windows | 163 completed emulated seconds |
+| Total completed scanouts in `_frames.csv` | **11,434** |
+| Total source-image changes | **4,206** (4,175 in 320×200; 31 in 720×400) |
+| 320×200 VGA scanouts | **10,985** |
+| 720×400 scanouts | 449 |
+| `_scanmem.csv` rows | **11,434**, exactly matching every frame index, completion timestamp, change flag and visible-image hash in `_frames.csv` |
+| `_lines.csv` rows | **70,000** |
+| Per-scanline sampled frames | **350**, each with all **200 rows**, with 70 frames in each one-second window |
+| Sampled windows (emulated seconds) | **40, 60, 80, 100, 120** |
+| Source read mode for every sampled line | **2: `vga.fastmem`**, mode `M_VGA` |
+| Draw source addressing | **`draw_address = masked_offset = line × 320`** in **all 70,000 samples**, ranging from 0 to 63,680 |
+| VGA line output vs renderer source-cache hash | **70,000 / 70,000 identical** |
+| VGA writes intercepted across full run | **10,192,885** operations |
+| DAC RGB commits in register stream | **21,773** |
+
+The source-cache comparison uses a 64-bit hash, not a byte-for-byte
+external GPU capture. Equality across 70,000 corresponding line hashes is
+strong evidence against corrupt or mis-retained renderer source lines in
+the observed windows. It cannot verify GPU/compositor presentation, and
+hash collisions are theoretically possible.
+
+Each of the five sampling windows has 70 complete 320×200 frames; their
+visually different frames number **34, 49, 27, 22 and 31**, respectively.
+The comparison baseline (first sampled frame in each window) has
+`previous_valid=0` and must be excluded from change-cause statistics.
+
+### Crucial controlled line-level comparison
+
+Across the **69,000** individual line rows having `previous_valid=1`:
+
+| Source-index bytes changed? | Effective palette hash changed? | VGA RGB line changed? | Rows |
+|---|---|---|---:|
+| No | No | No | **48,023** |
+| No | Yes | No (palette change not visible in this line) | **6,718** |
+| No | Yes | Yes | **565** |
+| Yes | No | Yes | **9,377** |
+| Yes | Yes | Yes | **4,317** |
+| **No** | **No** | **Yes** | **0** |
+
+The output of the VGA RGB line and its latched source-cache line also
+has **identical change flags in all rows**. In other words:
+
+- **14,259** of these 69,000 comparable lines visibly changed.
+- Every visible line change is accompanied by at least one detected change
+  to the indexed source line and/or effective palette at its draw time.
+- Only **565** changed lines had unchanged source indices with a changed
+  effective palette; palette cycling is real, but does not explain all
+  motion.
+- **6,718** line comparisons observed palette state changes that did **not**
+  change RGB output. This shows why a palette update alone does not imply a
+  displayed image change.
+- No discrepancy in sampled VGA-produced RGB versus the renderer cache was
+  found. Accordingly the earlier hypothesis of a corrupting
+  source-cache stage lacks supporting evidence in this test.
+
+### Resolving the earlier “changed image with no writes” ambiguity
+
+The **2026-11-10 13:11:08** session, *separate from* the earlier 12:45:05
+session, has 4,175 changed 320×200 frames. Among them:
+
+- **885** changed frames have no *net* start/end or inter-frame change
+  in the sampled raw VGA memory, fastmem or effective palette boundary
+  fingerprints.
+- **837** of these have **zero** observed VGA page-handler write operations
+  and **zero** DAC RGB commits in the completion-to-completion interval,
+  according to `_vram.csv` (1-ms buckets) and `_regs.csv` timestamps.
+- **All 837 of these 837** follow a scanout that reported
+  `fast_changed_during=1` and `raw_changed_during=1` in
+  `_scanmem.csv`. The preceding completion-to-completion interval also
+  contained nonzero intercepted VGA writes **in every one of the 837
+  cases** (median **1,363** write operations, minimum 8).
+- **32** of these 837 cases fall in one of the five sparse scanline
+  windows. **All 32** had source-index line changes
+  (`source_changed=1` on affected lines), **no effective palette hash
+  change** relative to the previous sampled frame on those lines, and
+  RGB line changes that match the retained source-cache lines.
+- Sample case: at scanout **2834** (40,463.6731 ms), 21 source lines
+  changed and the `region_mask` was `0000000010`. There were no
+  observed VGA write operations or DAC commits since the preceding
+  scanout completion, and no *net* current boundary state changes,
+  **but the preceding scanout had changed VGA memory during drawing**.
+- Another case: scanout **4206** (60,039.4571 ms) changed 193 source
+  lines and all 40 image regions; likewise it followed a scanout with
+  VRAM changes.
+
+This establishes a **consistent, directly observed temporal sequence**:
+
+1. While VGA progressively draws scanout **N**, the game writes VRAM.
+2. Some lines in N have already been read, so N's completed RGB source
+   image can still contain older line contents.
+3. Scanout **N+1** reads the same VRAM areas later, exposing those
+   already-written pixels, **even with no new writes in the interval since
+   N completed**.
+4. The full raw/fastmem hashes may remain unchanged over the
+   start/end boundaries of N+1, because those writes occurred during N.
+
+The pattern is not proof that *every one* of the 837 cases was caused
+exclusively by a read-after-write interleave; source-line hashes are
+sampled sparsely and other VGA state can exist. However, the complete
+preceding-scanout correlation and the 32/32 line-level confirmations
+strongly favour **ordinary progressive scanout visibility of earlier
+writes** over unexplained pixel generation or a renderer-cache defect.
+
+**This supersedes the earlier interpretation that boundary-invariant
+source-image changes necessarily suggested mysterious writes, a
+corrupted renderer cache, or transient memory restoration.** They are
+consistent with memory mutations that were captured *in the previous
+scanout*, but not yet visible in its earlier-rendered lines.
+
+### What remains open
+
+- We have **not** measured MK2's actual simulation loop/update ticks,
+  and a different source image does not equal a fighter animation update.
+- The recurrent 3-1-1-2 visual change cadence at all CPU-cycle settings
+  may be a combination of **~60.052 Hz PIT, ~70.09 Hz VGA, nonuniform
+  game rendering bursts, palette cycling and progressive scanout**.
+  The present data do not assign exact weights to these contributors.
+- Hardware-faithfulness of the scanout model, actual input response
+  latency, and final GPU presentation timing remain unverified.
+- Avoid changing PIT, refresh or scaler settings merely to turn output
+  into equal interval gaps. Doing so could break original timing.
+- A future worthwhile experiment is a *targeted guest simulation-update
+  counter* or comparison to reference execution/hardware, rather than
+  expanding general VGA logging indefinitely.
+- Continue comparing tracer-on and tracer-off host performance to
+  quantify measurement overhead.
+
 ## Context to restore in a new chat
 
-> Research project: DOSBox Staging MK2 DOS visual timing, private repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read `docs/mk2-timing-research-findings-2026-11-09.md` and `docs/mk2-timing-research.md`. PIT ~60.052 Hz (divisor 19869), VGA ~70.09 Hz; source-image differences often follow repeated 3-1-1-2 refresh intervals at 20k/40k/80k CPU cycles. Five CSV probes are Windows-validated. The last all-five capture `mk2_40000_20261110_124505` had 10,505 scanouts, 3,678 changed images; 9,975 mode-320x200 scanouts and 3,642 changes. 1,519 changed graphics frames had VRAM mutation during a scanout, 308 only between scanouts, 1,060 palette-only between scanouts and 755 no sampled net boundary difference. 696 of the 755 additionally had no intercepted VRAM write/DAC RGB commit between complete scanouts. These are NOT proven emulation bugs; transient writes, scanline mixing, other VGA state or renderer cache effects remain possible. A SIXTH CSV, `_lines.csv`, is now committed (but NOT YET Windows-built) and samples every source line only during emulated seconds 40,60,80,100,120. It compares source-index hash, effective palette hash, VGA-produced RGB line, and renderer source-cache line; timestamps/address/line and frame index allow cross-CSV correlation. Build/test this newest branch, capture at least ~85 seconds at 40k cycles, then upload all six CSVs and investigate the 696-class cases, with attention to recurring region masks. No timing or game binary modifications. Raw CSVs are not in GitHub.
+> Research project: DOSBox Staging MK2 DOS visual timing (private GOG install), repo `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read this findings log (especially **Follow-up capture 2026-11-10 — six-stream line-level results**) and `docs/mk2-timing-research.md`. PIT0 ~60.052 Hz (divisor 19869), VGA ~70.09 Hz. The recurring 3-1-1-2 spacing between source-image changes occurs at 20k/40k/80k cycles. SIX opt-in CSV streams are now built and Windows-validated. Last capture: `mk2_40000_20261110_131108`, 163 seconds, 11,434 scanouts, 4,206 changed images, 10,985 graphics scanouts, 4,175 graphics changes. The `_lines.csv` captured 350 frames (70 per one-second window at 40,60,80,100,120s) and 70,000 scanlines. Every VGA-generated RGB line hash matched the latched renderer-cache line hash. All 14,259 changed lines out of 69,000 comparable line rows had changed source pixel indices and/or effective palette; ZERO unexplained output line changes. Of 4,175 changed graphics frames, 837 showed no observed VRAM writes/DAC commits since previous completion and no net boundary changes, but **all 837** immediately followed an earlier scanout with observed VRAM changes during drawing and writes in that prior interval. 32 of those 837 were line-sampled, and **32/32** showed source pixel index line changes without palette changes. Best working interpretation: VGA may draw some lines before an in-scanout guest VRAM write and show the new pixels on scanout N+1 without new writes after N completes. This is not evidence of a broken renderer cache or an established emulator defect. Do NOT change PIT/VGA clocks yet. Next worthwhile task: targeted guest simulation tick instrumentation or cross-check against reference/hardware, and trace-on/off performance controls. No game executable/assets distributed; raw CSVs live outside the repo.
 
 **Do not assume the source CSVs are in the repository.** If necessary, upload the previous five CSVs again, or preferably all six from the next run. Maintain this document when new evidence changes a hypothesis.
