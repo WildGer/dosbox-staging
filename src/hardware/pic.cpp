@@ -30,6 +30,11 @@ void Mk2SignalOnTaskDispatch()
 	Mk2SignalProbe::Get().OnTaskDispatch();
 }
 
+void Mk2SignalOnMovementFunctionEntry()
+{
+	Mk2SignalProbe::Get().OnMovementFunctionEntry();
+}
+
 bool Mk2SignalBeforeWrite(const PhysPt addr, const uint8_t size)
 {
 	return Mk2SignalProbe::Get().BeforeGuestStore(addr, size);
