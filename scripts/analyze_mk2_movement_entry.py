@@ -156,6 +156,44 @@ def main() -> None:
                     f"intervals with 2+ entries="
                     f"{sum(c > 1 for c in multiples.values()):,}"
                 )
+            # Separate repetitions of one CALL within an IRQ interval
+            # from separate CALL sites sharing the same IRQ interval.
+            group_intervals = {}
+            for pc, group in entries_by_return.items():
+                group_intervals[pc] = {
+                    bisect_right(producer, float(row["emulated_ms"])) - 1
+                    for row in group
+                } - {-1}
+            repeated_same_caller = sum(
+                len(group) - len(group_intervals[pc])
+                for pc, group in entries_by_return.items()
+            )
+            shared_between_callers = (
+                sum(len(ticks) for ticks in group_intervals.values())
+                - len(set().union(*group_intervals.values()))
+            )
+            print("  Multiplicity breakdown:")
+            print(f"    Extra entries at same CALL site and tick: "
+                  f"{repeated_same_caller:,}")
+            print(f"    Extra cross-CALL-site tick memberships: "
+                  f"{shared_between_callers:,}")
+            print(f"    Sum of both: "
+                  f"{repeated_same_caller + shared_between_callers:,} "
+                  f"(should equal matched entries minus unique ticks)")
+            print("  Caller-specific EAX and EBP context:")
+            for pc, group in sorted(entries_by_return.items(),
+                                    key=lambda it: -len(it[1]))[:args.top]:
+                eax_obj = sum(
+                    int(row["entry_eax"]) in (
+                        int(row["object_a_pointer"]),
+                        int(row["object_b_pointer"]),
+                    )
+                    for row in group
+                )
+                ebp_top = Counter(int(row["entry_ebp"]) for row in group)
+                print(f"    return=0x{pc:08X}: "
+                      f"EAX matches candidate object={eax_obj:,}/{len(group):,}, "
+                      f"top EBP={[(f'0x{k:08X}', n) for k, n in ebp_top.most_common(3)]}")
         else:
             print("\nSignal CSV present, but no matching IRQ0 writes.")
     else:
@@ -196,6 +234,64 @@ def main() -> None:
                       f"entry IRQ0 intervals={len(ticks):,}, "
                       f"with ADDs={len(common):,}, "
                       f"without recorded ADDs={len(ticks - set(move_ticks)):,}")
+            print("  Entry-versus-ADD ordering within each IRQ0 interval:")
+            # Same-tick coincidence is expected when most ticks have ADDs;
+            # timestamp ordering is a stronger but still noncausal check.
+            ordered_adds = defaultdict(list)
+            for row in axis1:
+                t = float(row["emulated_ms"])
+                k = bisect_right(producer, t) - 1
+                if k >= 0:
+                    ordered_adds[k].append(
+                        (t, row["object"], int(row["object_pointer"]))
+                    )
+            for calls in ordered_adds.values():
+                calls.sort()
+            all_move_ticks = set(ordered_adds)
+            active_tick_baseline = len(all_move_ticks) / len(producer)
+            print(f"  ADD-containing IRQ0 intervals: "
+                  f"{len(all_move_ticks):,}/{len(producer):,} "
+                  f"({active_tick_baseline * 100:.2f}% of observed producer events)")
+            for pc, group in sorted(entries_by_return.items(),
+                                    key=lambda it: -len(it[1]))[:args.top]:
+                later = []
+                earlier = 0
+                no_adds = 0
+                same_tick_add = 0
+                later_objects = Counter()
+                for entry in group:
+                    t = float(entry["emulated_ms"])
+                    tick = bisect_right(producer, t) - 1
+                    if tick < 0:
+                        continue
+                    adds = ordered_adds.get(tick, [])
+                    if not adds:
+                        no_adds += 1
+                        continue
+                    same_tick_add += 1
+                    if any(addtime < t for addtime, _, _ in adds):
+                        earlier += 1
+                    post = [(addtime, obj, ptr) for addtime, obj, ptr
+                            in adds if addtime >= t]
+                    if post:
+                        first = min(post, key=lambda e: e[0])
+                        later.append(first[0] - t)
+                        later_objects[(first[1], first[2])] += 1
+                print(f"    return=0x{pc:08X}: "
+                      f"entry events with ADD in same tick={same_tick_add:,}; "
+                      f"with later ADD={len(later):,}; "
+                      f"with earlier ADD={earlier:,}; "
+                      f"without ADD in tick={no_adds:,}")
+                if later:
+                    print(f"      Delay to first subsequent ADD in tick: "
+                          f"median={median(later):.3f}ms, "
+                          f"min={min(later):.3f}ms, "
+                          f"max={max(later):.3f}ms")
+                    print(f"      First subsequent tracked object: "
+                          f"{[(obj, f'0x{ptr:08X}', n) for (obj, ptr), n in later_objects.most_common(4)]}")
+            print("  Note: even a consistently later ADD does not prove "
+                  "it is CALLED by this entry; unrelated work can run "
+                  "later within the same IRQ interval.")
             print("  Note: multiple objects may integrate per timer "
                   "interval; do not equate event counts directly.")
     else:
