@@ -1,0 +1,1473 @@
+# MK2 DOS timing research (experimental)
+
+**Research log and handoff:** [MK2 timing findings (2026-11-09)](mk2-timing-research-findings-2026-11-09.md).
+This is the authoritative continuity document for observations, CSV filenames,
+uncertainties, current work, and how to resume after a chat reset.
+
+
+This fork includes **opt-in CSV telemetry** to investigate why
+*Mortal Kombat II* for MS-DOS appears less fluid than MK1/MK3.
+
+**No MK2 executable or game data is included or modified.**
+The probe doesn't change PIT divisors, IRQ timing, VGA scanout, CPU cycles,
+gameplay logic or video presentation.
+
+## Build
+
+This branch follows the fork's current `main` (November 2026 development
+code), **not** the 0.83.0 release tag. For up-to-date Windows prerequisites,
+see [build-windows.md](build-windows.md).
+
+From PowerShell:
+
+```powershell
+git clone --branch mk2-timing-research https://github.com/WildGer/dosbox-staging.git
+cd dosbox-staging
+$env:VCPKG_ROOT = "C:\vcpkg"
+# Visual Studio 2022 + Clang:
+cmake --preset=release-windows-vs2022
+cmake --build --preset=release-windows-vs2022
+```
+
+If using Visual Studio 2026, replace `release-windows-vs2022` with
+`release-windows`. CMake, Clang tools and vcpkg must be installed first.
+
+## Enable the CSV trace
+
+Create a writable directory (for example `C:\MK2Captures`), then launch
+the **newly compiled executable** from the **same PowerShell session**:
+
+```powershell
+New-Item -ItemType Directory -Force C:\MK2Captures
+$env:DOSBOX_MK2_TRACE = "C:\MK2Captures\mk2_40000.csv"
+# Run the executable produced by the build, with your normal MK2 config.
+# Locate it with: Get-ChildItem .\build -Recurse -Filter "dosbox*.exe"
+```
+
+The trace starts automatically when DOSBox runs. Start MK2, let a fight run for
+20-30 seconds, then exit DOSBox. The PIT/VGA summary file gets a row per ~1 emulated second,
+and flushed to disk **from the core millisecond ticker**, not from the VGA
+vertical refresh callback. This keeps logging when VGA output changes mode or
+stops sending refresh callbacks. Recording video is **not required** to collect
+the CSV.
+
+If `DOSBOX_MK2_TRACE` is unset or set to `0`, both trace streams stay disabled.
+Set it to `1` for `mk2_timing.csv` plus `mk2_timing_frames.csv` in the
+working directory, or set an absolute filename as shown above. The folder must
+already exist. With `mk2_40000.csv`, the second file is `mk2_40000_frames.csv`.
+
+## Suggested tests
+
+Keep video, audio, machine type, presentation mode and gameplay scenario
+constant, and repeat with:
+
+| Run | `cpu_cycles_protected` | CSV filename |
+|---|---:|---|
+| A | 20000 | `mk2_20000.csv` |
+| B | 40000 | `mk2_40000.csv` |
+| C | 80000 | `mk2_80000.csv` |
+
+Include ~5 seconds before the fight so PIT reprogramming can be seen. Keep
+the full CSV: the early rows may show DOS at ~18.2 Hz and later rows MK2 at
+~60 Hz. A control test at the DOS prompt is also useful.
+
+## CSV columns
+
+| Field | Meaning |
+|---|---|
+| `emulated_ms` | Time on DOSBox's emulated PIC clock at end of window |
+| `host_elapsed_ms` | Real monotonic time since the first emulated clock tick observed |
+| `window_emulated_ms` | Length of reporting window in emulated time |
+| `window_host_ms` | Real time consumed by the same window |
+| `pit0_events` | Number of PIT channel 0 scheduled events (not necessarily delivered IRQs) |
+| `pit0_measured_hz` | PIT events per emulated second |
+| `irq0_dispatches` | Number of IRQ0 hardware interrupts actually dispatched to the CPU |
+| `irq0_measured_hz` | IRQ0 dispatches per emulated second |
+| `vga_refreshes` | Emulated vertical refresh events |
+| `vga_measured_hz` | Emulated refresh events per emulated second |
+| `vga_3da_reads` | Reads of the VGA input-status register (port 3DAh) |
+| `vga_3da_vsync_high` | Those status reads where vertical retrace bit 3 was set |
+| `pit0_divisor` | Last fully programmed PIT0 count (0 denotes not yet observed) |
+| `pit0_programmed_hz` | Latest requested PIT0 frequency |
+| `pit0_programs` | Number of completed PIT0 reprogramming operations in the window |
+
+The actual per-window event rates are more informative than the divider alone.
+A **programmed 60 Hz PIT does not prove that game logic or rendering runs at
+60 FPS**. Likewise, VGA refresh frequency does not indicate the number of
+unique rendered frames. Compare separately against captured AVI frame-change
+analysis and the fight timer.
+
+The code records **scheduled PIT0 events vs. dispatched IRQ0 interrupts**
+separately, so a masked/pending interrupt cannot be mistaken for a game tick.
+It does **not** yet prove that MK2's IRQ handler runs once per simulation tick.
+
+## Source scanout frame pacing (`*_frames.csv`)
+
+A separate CSV now captures **every completed, non-aborted source scanout**,
+just after the renderer latches its complete source frame. The timestamp is
+taken **before hashing**. This is an emulated/renderer boundary, not a
+measurement of what the monitor physically displayed or of the moment the
+game wrote to VRAM.
+
+For each scanout, the probe computes:
+
+- An FNV-1a fingerprint of the source pixel data.
+- For indexed 8-bit frames, a fingerprint of each pixel's **mapped RGB
+  colour**, plus a separate diagnostic fingerprint of only the palette
+  entries actually used. Changed raw palette indices that result in exactly
+  the same displayed colours do **not** count as a new visible image; a changed
+  unused palette entry does not count either.
+- Changes to frame geometry (width/height/pitch/pixel format).
+
+Visible-image changes are determined by comparing the RGB-equivalent
+fingerprint and geometry with the previous complete scanout.
+The hashing does not modify VRAM, PIT, IRQ0, VGA settings, source pixels or
+presentation controls. Pause-time synthetic repaints and aborted scanouts
+are excluded. It does add some CPU load while tracing is enabled.
+
+| Column | Meaning |
+|---|---|
+| `scanout_index` | Completed source scanout sequence number |
+| `emulated_ms` | PIC emulated clock timestamp in milliseconds, with fractional precision |
+| `host_elapsed_ms` | Monotonic real time since the first trace frame |
+| `scanout_interval_emulated_ms` | Time between this and prior completed scanout, emulated |
+| `scanout_interval_host_ms` | Same interval on the real host clock |
+| `changed` | 1 when the RGB-equivalent source image or geometry changed |
+| `pixels_changed` | 1 when source pixel bytes differ from previous scanout |
+| `visible_palette_changed` | 1 when used palette RGB fingerprint differs |
+| `geometry_changed` | 1 on resolution, pitch, or pixel format change |
+| `consecutive_repeats` | Count of consecutive identical source scanouts after last change |
+| `change_interval_emulated_ms` | Time since the preceding changed image, or 0 if unchanged / first |
+| `change_interval_host_ms` | Same visual-change interval on host clock |
+| `width`, `height`, `pixel_format` | Source frame geometry and pixel format enum |
+| `pixel_hash`, `visible_palette_hash`, `visible_hash` | 64-bit hexadecimal fingerprints of raw bytes, used colours, and RGB-equivalent image respectively; **not** original image contents |
+| `region_mask` | 40-bit hexadecimal mask: 8 columns x 5 rows, bit 0 top-left, bit 39 bottom-right; one bit per region whose pixels changed |
+| `regions_changed` | Number of changed grid cells, 0–40 |
+| `regions_valid` | 1 when region fingerprinting supports the source pixel layout, otherwise 0 (ignore mask) |
+
+Interpretation:
+
+- Count changed frames per **emulated second**, then separately compare the
+  **host** change intervals. A 70 Hz scanout can contain repeated images.
+- For a 60 Hz source shown by a 70 Hz scanout, expect repeated images at
+  intervals, but **do not presume** that the game necessarily generates
+  60 distinct images per second.
+- For repeated captures, compare the distribution of nonzero
+  `change_interval_emulated_ms` (median, p95/p99, repeated scanout runs),
+  not just average changed frames/sec.
+- Exclude the loading screen and mode transitions from gameplay statistics.
+- A changed source image need not mean a game-logic update: HUD changes,
+  palette animation, and different portions of a scroll are counted as image
+  changes. `pixels_changed=1` alone is **not** proof of a visually changed
+  image when indexed colours map to identical RGB. Hash collisions are
+  theoretically possible but extremely unlikely.
+- Hashes represent sampled source scanout images, *not* GPU swaps, desktop
+  compositor timing, monitor presentation, or when the game wrote pixels to
+  video memory. Separating actual simulation ticks would require an
+  additional instrumentation stage.
+
+The frame CSV is written next to the existing PIT/VGA CSV, using the same
+environment variable and launch script. No new switch is required.
+
+### Regional follow-up: 8x5 changes
+
+The frame trace now adds a 40-bit `region_mask` for each completed
+source scanout. This divides the frame into **8 columns by 5 rows**.
+
+```text
++--+--+--+--+--+--+--+--+
+|00|01|02|03|04|05|06|07|  top row
++--+--+--+--+--+--+--+--+
+|08|09|10|11|12|13|14|15|
++--+--+--+--+--+--+--+--+
+|16|17|18|19|20|21|22|23|
++--+--+--+--+--+--+--+--+
+|24|25|26|27|28|29|30|31|
++--+--+--+--+--+--+--+--+
+|32|33|34|35|36|37|38|39|  bottom row
++--+--+--+--+--+--+--+--+
+```
+
+For example, `region_mask=0000000001` means only the top-left cell
+changed; `0000000100` means only cell 8 changed (leftmost cell in
+the second row). A 320x200 source frame uses roughly 40x40-pixel cells.
+
+A regional change is based on RGB colours for Indexed8 and on source
+pixel bytes for other supported packed formats. The implementation runs
+only when `DOSBOX_MK2_TRACE` is enabled and does not alter frame output.
+The 8x5 region probe adds **another read-only pass** across source
+pixels, so check observer overhead if results are unexpectedly different.
+
+To study whether the 3-1-1-2 sequence is produced by changes across
+the entire image or particular characters/background elements, compare
+the `region_mask` across successive `changed=1` rows. No image
+content or game executable is exported.
+
+## VGA memory-write timeline (`*_vram.csv`)
+
+The trace also creates `mk2_40000_<timestamp>_vram.csv` next to the two
+existing files. This third CSV correlates **guest writes to VGA page handlers**
+with IRQ0 delivery, VGA vertical-refresh events, and completed source scanouts.
+
+Data is aggregated into **1 millisecond of emulated time per row**. Idle
+millisecond buckets are omitted. No files are written from individual video
+memory write callbacks. Only the **first write timestamp** in each bucket is
+measured exactly; subsequent last-write timestamps are sampled every 32
+observed writes to reduce observer effect. All the event timestamps are in
+DOSBox's emulated PIC clock domain. Compare rows to `*_frames.csv` for the
+times of visually distinct images.
+
+| Column | Meaning |
+|---|---|
+| `emulated_ms_end` | End of the 1 ms emulated time bucket |
+| `write_ops` | Guest write operations (byte, word, dword) handled by VGA callbacks |
+| `guest_write_bytes` | Sum of guest write widths; **not** number of changed pixels |
+| `write8`, `write16`, `write32` | Breakdown of observed write operations by guest access width |
+| `first_write_ms` | Timestamp of the first guest VGA write in this 1 ms bucket |
+| `last_write_sample_ms` | Timestamp sampled at first write and every 32nd write; **not guaranteed exact last-write time** |
+| `irq0_dispatches`, `last_irq0_ms` | IRQ0 dispatch count and last IRQ0 timestamp in the bucket |
+| `vga_refreshes`, `last_vga_ms` | VGA refresh-event count and last timestamp |
+| `scanouts`, `last_scanout_ms` | Completed source-frame count and last completion time |
+| `vga_mode` | Internal VGA memory mode enum for the selected page-handler configuration |
+| `page_handler_covered` | 1 when the selected conventional VGA handler intercepts writes, 0 when direct mapped |
+| `mapping_changes` | Number of VGA handler-mode changes in the bucket |
+
+### Coverage limitations and interpretation
+
+**The write counts only include VGA page-handler callbacks.** DOSBox sometimes
+maps guest writes directly to backing memory (`VGA_Map_Handler` and LFB direct
+mapping), bypassing those callbacks. This probe **does not reroute those
+mappings**, deliberately avoiding timing and memory-behaviour changes.
+
+- If `page_handler_covered=0`, the absence of `write_ops` cannot be
+  interpreted as an absence of VRAM writes. For high-confidence conclusions,
+  analyze samples with `page_handler_covered=1` and nonzero write counts.
+- `page_handler_covered=1` describes the **selected conventional VGA page
+  handler**, not all possible concurrent direct-mapped LFB or external
+  hardware engines. This is particularly relevant for SVGA/VESA games, though
+  it should be less relevant to MK2's conventional VGA modes.
+- A guest write operation may rewrite a value that is already present, touch
+  an unused video-memory bank, or update part of a line still waiting to be
+  scanned out. The actual image change is established separately by
+  `*_frames.csv`, not by counting guest write operations.
+- Because the probe samples the first write timestamp and only every 32nd
+  subsequent write, it is suitable for **millisecond-scale activity bursts**,
+  **not** locating each individual CPU store within a scanline.
+- CPU overhead and CSV volume can be significant in write-intensive scenes.
+  Repeat a comparable no-trace control (`DOSBOX_MK2_TRACE=0`) to ensure
+  observer effects have not changed MK2's perceived timing.
+
+### Next analysis
+
+For each recurring 3-1-1-2 sequence in `*_frames.csv`, align
+`emulated_ms` to the 1 ms `emulated_ms_end` buckets and ask:
+
+1. Does MK2 issue a similar write burst every ~16.65 ms after IRQ0, or do
+   distinct write bursts precede separate visually changed frames?
+2. Are the apparent 14/28/43 ms image-change intervals already visible in
+   **write activity**, or do they emerge only on the VGA scanout boundary?
+3. Do long unchanged screen intervals correspond to no writes, writes to an
+   unobserved mapping, or writes that do not alter visible pixels?
+
+This instrumentation cannot by itself determine the game's simulation
+update rate; that would require targeted guest-side hook points.
+
+## VGA display registers / palette event timeline (`*_regs.csv`)
+
+A fourth opt-in file is generated alongside the PIT/VGA, visual-frame and
+VRAM-write traces: `mk2_40000_<timestamp>_regs.csv`.
+
+Unlike the 1 ms-aggregated VRAM-write CSV, this file contains **individual
+register-related events with fractional PIC emulated-millisecond timestamps**.
+The timing source is the same as `*_frames.csv` and `*_vram.csv`.
+
+Each event includes one or more of the programmed or latched values below:
+
+| Event (`event`) | Meaning |
+|---|---|
+| `crtc_start_write` | A write to CRTC index 0Ch or 0Dh, including the combined programmed start address |
+| `start_latch` | VGA applies the programmed display-start address (`real_start`) on a scheduled display-start latch event |
+| `pel_pan_write` | Attribute register 13h programs horizontal pixel panning |
+| `pan_latch` | VGA applies the programmed horizontal pixel panning to the draw state |
+| `dac_rgb_commit` | The third DAC component byte (port 3C9h) completes a 6-bit R/G/B palette entry, before index increment |
+| `dac_mask_write` | Port 3C6h changed the PEL mask |
+| `attr_palette_map` | A 16-colour attribute palette entry was mapped to a DAC index |
+| `vga_refresh` | VGA refresh callback, with snapshot of programmed and latched state |
+| `scanout_complete` | Completed source image, with snapshot of programmed and latched state |
+
+Columns:
+
+- `event_index`: monotonically increasing sequence number, useful for
+  preserving ordering when multiple events share the same timestamp.
+- `emulated_ms`: fractional PIC clock timestamp in milliseconds.
+- `register`, `value`: written register/index and raw value when relevant;
+  negative one (`-1`) represents an unused field.
+- `display_start_programmed`: current `vga.config.display_start`.
+- `display_start_latched`: current `vga.config.real_start`; this may
+  lag the programmed address until a scheduled VGA latch event.
+- `panning_programmed`: current `vga.config.pel_panning`.
+- `panning_latched`: current `vga.draw.panning`.
+- `dac_index`, `dac_red6`, `dac_green6`, `dac_blue6`: the selected DAC
+  entry and its component values (6-bit components, 0–63). An attribute
+  palette mapping event reports only the destination DAC index.
+
+The events are gathered only with `DOSBOX_MK2_TRACE` enabled; otherwise the
+probe does no logging. Entries are buffered and flushed every 256 events,
+not on every individual I/O write. The trace records programmed values
+*after* existing DOSBox register logic runs, without altering it.
+
+### Correlating the traces
+
+For a changed image in `*_frames.csv`:
+
+1. Find the corresponding `scanout_complete` by timestamp in
+   `*_regs.csv`. Check whether the latched display start or panning differs
+   from the previous completed scanout.
+2. Inspect nearby `crtc_start_write` or `pel_pan_write` events and their
+   later `start_latch` / `pan_latch` application.
+3. Check `dac_rgb_commit`, `dac_mask_write` and
+   `attr_palette_map` in the same interval. A palette update may change the
+   visible RGB output without a corresponding page-handler VRAM write.
+4. Compare those events against write bursts in `*_vram.csv` and the
+   `region_mask` in `*_frames.csv`, using emulated timestamps throughout.
+
+**Interpretation limits:** A DAC entry programmed to its previous RGB value
+is still logged as a commit; likewise, re-writing an unchanged CRTC value
+is logged. A change of a register that affects an unused palette entry may
+not alter visible pixels. Display-start and panning are not the only ways
+to alter VGA presentation. Per-scanline changes, uncovered direct-mapped
+VRAM writes and GPU/host presentation timing are not diagnosed by this probe.
+The register CSV identifies candidate causes, not proof of guest simulation
+rate or a unique rendering root cause.
+
+## NEW: scanout boundary memory/colour comparison (`*_scanmem.csv`)
+
+In addition to the four existing CSV streams, the branch now emits a **fifth**
+file named like `mk2_40000_20261110_124505_scanmem.csv`. **The
+2026-11-10 capture compiled and ran successfully on Windows**. All 10,505
+sampled scanouts aligned exactly with the source-frame CSV hashes and times.
+See the linked findings log for the classification of the remaining 696
+source-image changes without observed VRAM writes or DAC RGB commits.
+
+It compares read-only fingerprints captured **at the start of scheduled
+scanline drawing and at completion of the same non-aborted scanout**:
+
+- `vga.mem.linear` — raw VGA backing memory, limited to the first 256 KiB.
+- `vga.fastmem` — accelerated VGA drawing buffer, first 128 KiB.
+- `vga.dac.palette_map` — current effective 256-entry RGB colour mapping.
+- The final source image `visible_hash` / `scanout_index` from
+  `*_frames.csv`, reused without calculating that expensive image hash again.
+
+The new CSV records whether each memory/palette state changed **within the
+scanout** (`*_changed_during`) and **between the preceding scanout's end and
+the current one's start** (`*_changed_between`). It records scanout geometry,
+actual source pointer class (raw/fastmem/other), selected `vga.mode`,
+display-start and panning, sample byte lengths, begin/end timestamps and
+fingerprints.
+
+**Caution:** whole-buffer hashes at just two instants do not identify when
+each line is fetched. Transient changes between snapshots or data outside
+these caps are invisible. An unchanged pair of boundary hashes cannot rule
+out transient writes or a scanline-mixed image. A changed hash may represent
+off-screen data rather than new visible pixels. Compare against
+`*_regs.csv`, `*_vram.csv`, and `*_frames.csv` before attributing a cause.
+The new sampler increases CPU work only when tracing is enabled.
+
+Test it with a 40k-cycle fight of ~60–90 s and keep all **five** CSV files.
+See the [research log](mk2-timing-research-findings-2026-11-09.md) for the
+validation checklist and recorded findings.
+
+## Verified: sparse per-scanline source and renderer-cache comparison (`*_lines.csv`)
+
+The sixth opt-in CSV, e.g. `mk2_40000_20261110_XXXXXX_lines.csv`,
+collects **individual VGA scanline samples** in tightly scoped windows.
+This is the follow-up to the 2026-11-10 five-CSV finding: 696 visually
+different 320×200 frames had no observed VGA write or DAC RGB commit
+in the previous scanout interval and no sampled net VRAM/palette boundary
+changes. This result is **unexplained, not proven to be an emulation bug**.
+
+### Collection strategy and interpretation
+
+- Enabled through the **existing `DOSBOX_MK2_TRACE` variable**. There is no
+  new command-line option.
+- **Only** collect in Mode 13-style 320×200 VGA (the observed RGB source is
+  320×200×4 bytes); **only** during the 1-second emulated windows
+  **40–41, 60–61, 80–81, 100–101 and 120–121 seconds** after launch.
+  The first sampled frame within each window is a baseline. This limits
+  observer effects. Gameplay must overlap these windows for meaningful data.
+- Immediately before each VGA line conversion, record its emulated time,
+  actual `vga.draw.address`, masked video-memory offset, source kind
+  (`1=raw vga.mem.linear`, `2=vga.fastmem`, `3=other`), a fingerprint
+  of the 320 source-index bytes and a fingerprint of the **effective**
+  256-colour RGB palette.
+- Immediately after `VGA_DrawLine()`, fingerprint the 1280 bytes of its
+  32-bit RGB output **before** they enter `ReelMagic_RENDER_DrawLine` and
+  the software scaler.
+- After the complete, non-aborted scanout has been latched by the renderer,
+  hash the corresponding source-cache row and compare with the VGA line
+  output. Sampling rows are written to the CSV **after frame completion**,
+  never from inside individual line-event callbacks. No rendered image
+  pixels, original assets or MK2 EXE are exported.
+- All hashes are 64-bit FNV-1a fingerprints, suitable for comparing output,
+  not cryptographic integrity proofs.
+
+Columns:
+
+| Column | Meaning |
+|---|---|
+| `scanout_index` | Join key to `*_frames.csv` and `*_scanmem.csv` |
+| `line` | Source image row 0–199 |
+| `frame_begin_ms`, `line_sample_ms`, `frame_complete_ms` | Fractional emulated PIC timestamps |
+| `draw_address`, `masked_offset` | Video memory address requested by VGA and address masked into source |
+| `source_kind` | Actual raw-memory or fastmem pointer class |
+| `previous_valid` | Has another sampled frame of this line in the current window |
+| `source_changed` | Source-index bytes differ from the preceding sampled frame |
+| `palette_changed` | Effective RGB lookup differs from preceding sampled frame |
+| `output_changed` | VGA-produced RGB line differs from preceding sampled frame |
+| `cache_changed` | Renderer source-cache line differs from preceding sampled frame |
+| `output_equals_cache` | VGA RGB bytes match the retained pre-scaler source-cache row |
+| `source_hash`, `palette_hash`, `vga_output_hash`, `renderer_cache_hash` | Four hex fingerprints |
+
+**Important limitations:** The RGB palette hash covers **all** entries,
+including those unused by a specific line; a changed palette hash does not
+prove that visible pixels changed. The source hash captures **a row at the
+instant of the conversion**, not VRAM every CPU cycle. Writes that change
+and restore pixels before the sample can escape detection. A mismatch with
+the final renderer cache can be due to resizing, scan doubling, another
+renderer behaviour, or true source/cache discrepancy; do not assume a bug.
+The test is restricted to the observed MK2 graphics configuration and does
+not claim coverage of every DOS graphics mode. These source-cache rows
+are **not** equivalent to final GPU presentation timings.
+
+**Windows runtime validated in 2026-11-10 capture**
+`mk2_40000_20261110_131108`: 350 complete sampled graphics frames
+and 70,000 line rows; all five one-second windows produced the expected
+70 frames of 200 lines each; sampled line and frame indices align with
+`*_frames.csv`. All 70,000 VGA RGB output line hashes match their
+corresponding latched renderer-cache row hashes. Out of 69,000 comparable
+(non-baseline) line rows, **every one of the 14,259 visibly changed RGB
+lines had a changed source-index hash and/or effective palette hash**.
+Not one observed RGB line change lacked both changes.
+
+In that run, 837 changed graphics frames with no observed VGA writes/DAC
+commits or net VRAM/palette changes between current scanout boundaries
+**all followed scanouts with VRAM modified during the previous draw**.
+32 of these were directly line-sampled, with source-index line changes.
+This supports next-scanout visibility of writes made after earlier lines
+were already read; it does not prove a defect or measure MK2 simulation
+frequency. See the [research findings](mk2-timing-research-findings-2026-11-09.md)
+for the full method, counts and limitations.
+
+For additional capture, run MK2 for at least 85 seconds to include the
+first three windows, and collect all **six CSV files from the same run**.
+Compare sampled `scanout_index` with `_frames.csv` `region_mask`
+and `_scanmem.csv` data, not with unrelated sessions.
+
+## NEW: guest execution-context sampling (`*_guest.csv`)
+
+This is a **discovery step toward measuring MK2's actual game simulation
+ticks**, **not yet a simulation tick counter**. The previous six probes
+characterized PIT (60.052 Hz), VGA (70.09 Hz), drawing bursts, the DAC,
+completed source images and individual scanlines. They cannot identify the
+program code that advances fighter positions, physics, input processing or
+animation state.
+
+The seventh probe observes the **guest CPU context** at meaningful events,
+without patching the guest EXE, overriding CPU scheduling or changing video
+timing. When `DOSBOX_MK2_TRACE` is enabled it creates a new file
+`mk2_40000_<timestamp>_guest.csv` in addition to the six existing CSVs.
+
+**Collection range:** emulated time **30 to 150 seconds** after launch.
+Outside this range, no context rows are captured. Sampling is deliberately
+limited rather than tracing every guest instruction:
+
+| Event name | What is actually sampled |
+|---|---|
+| `irq0_pre` | CPU state immediately **before** DOSBox delivers the IRQ0 interrupt; this is **not** the IRQ handler entry |
+| `vram_first_write_ms` | CPU state at the first *observed VGA page-handler write* in a 1-ms bucket, **not** the first write instruction of a frame |
+| `vga_status_rising` | CPU state on a 3DAh read when the returned vertical-sync bit changes low→high |
+| `vga_status_sample` | CPU state every 2048th 3DAh read |
+| `clock_10ms` | Scheduler CPU-state sample every 10 emulated milliseconds, independent of graphics events |
+
+A fixed-size internal buffer holds records and flushes in batches at the
+emulated-second boundary (or when filled), rather than writing from the hot
+IRQ, I/O and VRAM handlers. An exit-time flush preserves the last partial
+batch. Because polling and writes are hot paths, the trace still has
+observer overhead; run a no-trace control before trusting host timings.
+
+The CSV exposes `sample_index`, `emulated_ms`, `event`, `cs`,
+`cs_base`, `eip`, `linear_cs_eip`, `protected_mode`, `cpl`,
+`vga_status`, and guest `EAX/EBX/ECX/EDX/ESI/EDI/EBP/ESP`.
+
+**Critical limitations:**
+
+- Under a **dynamic CPU core**, the saved `EIP` visible in a hardware or
+  video callback may refer to a translation-block boundary rather than
+  the exact triggering instruction. Even in the normal core, the callback
+  may see a pre-instruction address or another nearby location. Treat all
+  code addresses as **candidates to validate**, not exact source sites.
+- The interrupted `CS:EIP` before IRQ0 is **not** an ISR-entry address,
+  and seeing ~60 such events per second **does not prove** MK2's simulation
+  advances 60 times per second.
+- Status polling hotspots identify waiting loops; VRAM write hotspots
+  identify rendering/memory copy routines. These can help locate a game
+  loop but are not themselves logic ticks.
+- `linear_cs_eip` uses the current CS segment base plus saved EIP. Keep
+  CS selector, CS base and mode with an address when investigating a DOS
+  protected-mode extender; a raw physical address alone is insufficient.
+- No code breakpoints, instruction counting, guest-memory-state watches,
+  modifications to MK2 or simulation-rate claims are made at this stage.
+
+### Offline candidate discovery
+
+A small **standard-library-only Python script** is provided:
+
+```powershell
+python scripts/analyze_mk2_guest_trace.py "$env:USERPROFILE\Documents\MK2Timing\mk2_40000_<timestamp>_guest.csv"
+```
+
+It reports the most frequent guest `CS:EIP` and clustered address
+windows **separately by event type**, with sample count and time spacing.
+It deliberately does **not** label hot locations as game simulation
+updates. A later, targeted experiment must confirm a routine with guest
+disassembly or direct state advancement before counting its calls.
+
+**Validated on Windows (2026-11-10):** The user compiled and ran the
+seventh guest-context probe at 40,000 cycles. The analyzer reported
+**30,385 samples** over the 30–150s window. All 1,473
+`vga_status_rising` and all 5,029 `vga_status_sample` events
+reported `CS:EIP=0180:002196D5`; 7,097 of 7,207 IRQ0 pre-dispatch
+samples reported `0180:00205489`; 4,676 first-VRAM-write
+samples clustered mainly around EIP `00204200–002049FF`.
+
+**This validates collection, not exact guest instruction addresses
+or true logic ticks.** Protected-mode `core=auto` uses dynamic
+translation. An I/O callback may report a saved EIP at a translated-block
+boundary. Before locating a game-loop routine, run a short
+`core=normal` comparison in a separate capture:
+
+```powershell
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
+& "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
+```
+
+The normal core executes guest instructions individually and is
+considerably slower. This is a **code-location verification run only**;
+do not equate its host timing and changed-image cadence with the
+existing dynamic-core measurements. Sample some active gameplay after
+emulated 30s, then inspect the new `_guest.csv` using the same
+`scripts/analyze_mk2_guest_trace.py` script.
+
+Disassemble matching candidate code using the correct DOS extender
+and load map. `EIP` is a guest virtual offset, not automatically an
+offset into the original MK2.EXE file. A verified code site that updates
+gameplay state will be needed before implementing a real simulation
+tick counter.
+
+## Local guest instruction snapshot (`*_guest_code.csv`)
+
+After validating the sampled CPU locations in both `core=dynamic`
+and `core=normal`, the next experiment is to **inspect a small amount of
+actual guest machine code**. The 2026-11-10 normal-core run had
+6,963 / 7,076 IRQ0-pre-dispatch samples in the 002054xx page, equally
+distributed over EIP 00205489/8F/92/94. Every one of 6,933 sampled
+3DAh status port reads used EIP 002196D5. These are **candidate
+wait/poll routines, not identified game logic ticks**.
+
+The updated `src/hardware/mk2_guest_probe.h` captures **at most
+one 64-byte read-only memory snippet at each of six confirmed code sites**,
+when the existing `DOSBOX_MK2_TRACE` variable is enabled.
+No per-instruction hook is involved. The separate local
+`*_guest_code.csv` contains a few memory bytes at
+`0180:00205489`, `0180:002196D5`, `0180:0020479A`,
+`0180:0020461A`, `0180:002042FC` and
+`0180:0020C81E` when the relevant event actually occurs.
+A row can be absent if the guest never reaches that PC while sampled.
+The CSV has `site,emulated_ms,cs,cs_base,observed_eip,
+snapshot_start,bytes_hex` fields.
+
+These bytes are captured from **the user's private copy of the game
+loaded into emulated memory**. The instrumentation in the public
+repository contains **no actual game bytes**. Do not commit any generated
+`_guest_code.csv` or extracted binaries to GitHub.
+
+### Run and inspect
+
+```powershell
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+$env:VCPKG_ROOT = "C:\vcpkg"
+cmake --build --preset=release-windows --parallel 8
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
+& "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
+
+$codeCsv = $env:DOSBOX_MK2_TRACE.Substring(0, $env:DOSBOX_MK2_TRACE.Length - 4) + "_guest_code.csv"
+Test-Path "$codeCsv"
+python scripts/extract_mk2_guest_code.py "$codeCsv"
+```
+
+The Python stdlib script writes private 64-byte `.bin` files next to
+the CSV and prints optional `ndisasm` (NASM) and GNU `objdump`
+commands, with guest EIP address origins. Inspect the control flow
+around the wait loop and port read and confirm calls/branches; never
+assume this output establishes the simulation frequency. The snapshots
+are **in-memory guest code**, not MK2.EXE raw file offsets.
+
+**Status:** This targeted code-byte snapshot modification is
+**committed but has not yet been compiled or runtime-validated** on
+the user's Windows system. The previous seven CSV probes have been run
+successfully. If the new CSV is empty, check that the game ran beyond
+30 seconds of emulated time and that the compiled binary contains the
+new branch head.
+
+## NEW: targeted pending-work signal writer watch (`*_signal.csv`)
+
+The privately decoded MK2 wait loop at `0180:00205489` repeatedly
+reads `DS:[ESI+0x24]`, with ESI loaded from `DS:[0x27177C]`.
+When the value is nonzero it saves it, adjusts another variable,
+and resets `DS:[ESI+0x24]` to zero. We still do not know **who
+produces the nonzero signal**, or whether it represents one combat
+logic tick.
+
+A new, **separately opt-in**, experimental memory-write watch
+(`src/hardware/mk2_signal_probe.h`) records the signal producer's
+address and timestamp.
+
+- Just **before IRQ0 dispatch**, when `core=normal` is interrupted
+  in the known `0180:00205489–00205494` consumer loop, it reads
+  the real DS selector and descriptor base, then the DWORD at
+  `DS.base + 0x27177C`, then resolves the watched linear address
+  `DS.base + pointer + 0x24`. **Do not assume DS base is zero.**
+- A guarded hook in `src/cpu/paging.h` observes normal-core
+  byte/word/dword/qword memory writes. It only reads guest memory
+  and captures CPU CS:EIP if a store **overlaps the 4-byte signal
+  or its pointer variable**. Cross-page stores are observed as
+  constituent byte stores.
+- Buffered entries are flushed every emulated second. No code or
+  guest state is modified. A small default-off branch remains in
+  the normal memory-writing path when the watch is disabled.
+
+Set **both** `DOSBOX_MK2_TRACE` (as in all earlier experiments)
+and `DOSBOX_MK2_SIGNAL_WATCH=1` before launching. Use **core=normal**.
+The probe samples emulated seconds 30–150. It does not capture
+direct-mapped writes made by dynamic translation and may miss pointer
+changes between consumer refreshes. The **expanded** watch has **not yet been compiled or runtime-validated
+on Windows**; the initial writer watch successfully logged 6,990
+clear instructions but no observed producer stores.
+
+The `*_signal.csv` output contains event `resolve`,
+`pointer_write`, `pointer_same`, `signal_write` or
+`signal_same`, together with `emulated_ms`, consumer DS
+selector/base, pointer value and location, actual watched linear
+address, original guest store address/width, DWORD before/after,
+and writer CS:EIP and DS context.
+
+A nonzero producer store is **not automatically a gameplay tick**.
+We must identify/disassemble the writer before assigning meaning.
+
+### Run this experiment
+
+```powershell
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+$env:VCPKG_ROOT = "C:\vcpkg"
+cmake --build --preset=release-windows --parallel 8
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$env:DOSBOX_MK2_SIGNAL_WATCH = "1"
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_normal_40000_$stamp.csv"
+
+& "$env:USERPROFILE\Documents\dosbox-staging\build\release-windows\Release\dosbox.exe" --nolocalconf --noautoexec --set "core=normal" --set "cpu_cycles_protected=40000" --set "presentation_mode=dos-rate" --set "vsync=off" "D:\GoG\Mortal Kombat 2\mk2\mk2.exe"
+
+$signalCsv = $env:DOSBOX_MK2_TRACE.Substring(0, $env:DOSBOX_MK2_TRACE.Length - 4) + "_signal.csv"
+Test-Path "$signalCsv"
+python scripts/analyze_mk2_signal_trace.py "$signalCsv"
+Remove-Item Env:DOSBOX_MK2_SIGNAL_WATCH
+```
+
+Run at least 60 seconds of *emulated* game time with active combat
+during part of seconds 30–150. Share `*_signal.csv` and the
+analyzer's stdout; no full game EXE or large graphical CSVs
+are needed for this stage. Empty/header-only output means we have
+not yet found a matched producer event; check `core=normal`,
+the requested environment variable, and the sampled consumer
+addresses before making conclusions.
+
+### 2026-11-10: why the first writer watch found only clears
+
+The user's first completed `*_signal.csv` analysis reported **6,991
+rows**: one `resolve` and **6,990 `signal_write` rows**, all
+at `0180:002054AD`, and all changes from nonzero to zero.
+Pointer `0x00009B00` resolved to linear target `0x00009B24`
+through the consumer's DS segment in that run. **No activation
+(`0 -> nonzero`) was observed by the first write hook.**
+The median reset spacing was **16.652 ms** (range 3.613–172.827 ms),
+close to the observed **~60.052 Hz** PIT0 period, but these resets are
+not established as game simulation ticks.
+
+**Important: the first probe was incomplete, not evidence that the
+producer did not exist.** In `BeforeGuestStore`, it rejected writes
+whenever `cpu.pmode` was false or `cpudecoder` did not equal
+`CPU_Core_Normal_Run`; those conditions may omit an interrupt or
+DOS callback producer. Moreover, some writes can bypass the
+ordinary guest store helpers or use a different linear alias.
+
+The updated, **still opt-in** watch now:
+
+- Checks the resolved linear write target regardless of the **current
+  CPU mode/decoder**, while still requiring a verified consumer
+  pointer and the 30–150 s emulated observation window.
+- Adds a **bounded normal-core instruction-boundary checker**:
+  on approximately every 60th IRQ0 delivery while the known
+  consumer is waiting, it checks the watched DWORD for at most
+  **16,000 subsequent interpreted instructions**. If the DWORD
+  changes, logs `opcode_transition` with the preceding guest
+  instruction's CS:EIP and before/after values, stopping early
+  after a detected zero-to-nonzero transition.
+- Uses `Mk2SignalInstructionActive` to keep the normal-core opcode
+  hot path to a single conditional when the check is not armed.
+
+The older direct-store events remain `signal_write` and
+`signal_same`. **Both mechanisms can observe the same change**:
+the analyzer deliberately separates their counts. The preceding
+opcode's EIP is a candidate instruction to verify by disassembly;
+a non-guest callback between boundaries could also alter the
+memory. This is a diagnostic-only run: do **not** compare CPU cost
+or host FPS with the earlier baseline.
+
+**Build this updated branch before repeating the test.**
+Keep `DOSBOX_MK2_TRACE` and `DOSBOX_MK2_SIGNAL_WATCH=1`,
+`core=normal`, 40,000 protected cycles and gameplay after emulated
+30 s. After quitting, run the same
+`scripts/analyze_mk2_signal_trace.py` command on the *new*
+`_signal.csv`. Share the CSV and analyzer output, especially
+`opcode_transition` and any positive `signal_write` PCs.
+
+### Confirmed producer, 2026-11-10 15:31: **09B0:08AF**
+
+The next Windows run successfully identified **6,108 positive
+signal writes** to watched linear address `0x9B24`, all from
+**CS 09B0, CS base 0x9B00, EIP 0x8AF**.
+The known protected-mode consumer at `0180:002054AD`
+performed **6,108 corresponding clears**. Both had
+median spacing **16.652 ms**, compatible with
+~60.052 Hz PIT0. The independent bounded opcode trace
+confirmed the same 09B0:08AF source **102 times**; those
+are duplicate observations, **not additional activations**.
+
+**Interpretation:** the code at `09B0:08AF` is very likely
+timer/interrupt-associated, but a timer's event frequency does
+not establish the combat simulation update cadence. We must
+inspect the actual producer instructions and confirm whether
+it is IRQ0-linked.
+
+**NEW opt-in code capture (not yet compiled on Windows):**
+`src/hardware/mk2_signal_probe.h` now creates
+`*_signal_code.csv` after the **first observed positive store**.
+It contains at most three 128-byte private snapshots:
+
+- `producer_at_write`: begins exactly at the writer EIP,
+  expected `09B0:08AF`.
+- `producer_preceding_32`: begins 32 bytes before that EIP,
+  useful for surrounding branches/calls, **may start inside
+  an instruction**.
+- `consumer_after_wait_2054FE`: protected-mode code at
+  `0180:002054FE`, following the wait/clear sequence.
+
+CSV also includes the current `protected_mode`,
+**`code_bits`** from the producer's actual code-segment
+operand size (16 or 32) and the IVT's **IRQ0 segment/offset**
+read from guest low memory 0x20/0x22. The existing
+`scripts/extract_mk2_guest_code.py` now selects
+`ndisasm -b 16` or `-b 32` according to this field.
+
+**Do not decode the producer as 32-bit merely because MK2's main
+protected-mode loop is 32-bit.** The writer is located in a
+different segment and may use 16-bit instructions.
+
+### Extract after rebuilding and repeating the signal-watch run
+
+```powershell
+# Run after the new capture is closed. No dependency on
+# DOSBOX_MK2_TRACE, which the PowerShell runner clears on exit.
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_signal_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $latest) {
+    Write-Host "No _signal_code.csv found: rebuild and rerun the updated probe."
+} else {
+    python scripts/extract_mk2_guest_code.py "$($latest.FullName)"
+}
+```
+
+Keep the `*_signal_code.csv` and extracted `.bin` files
+private; they contain short snippets from the user's own MK2
+memory, and **must not be committed to GitHub**.
+A vector pointing to the producer's segment supports a timer-
+handler hypothesis, but instruction-level disassembly and
+call-chain tracing are still needed to establish what function
+actually advances game logic.
+
+### NEW: observe delayed-task callback destinations (`*_dispatch.csv`)
+
+**Based on actual private MK2 instruction bytes**, the continuation
+`0180:002054FE` traverses a list of task nodes via
+`ESI = DWORD [ESI]`, decrements `WORD [ESI+6]`,
+skips nodes with a positive remaining countdown, then
+copies task context and jumps at **`0180:00205531`**
+using `JMP DWORD [ESI+0x1C]`. This supports a timer-driven
+delayed-task dispatcher, **not yet a confirmed simulation tick**.
+
+The updated, **default-off** `core=normal` instrumentation
+samples *only* the decoded instruction `0180:00205531`
+while **both** `DOSBOX_MK2_TRACE` and
+`DOSBOX_MK2_SIGNAL_WATCH=1` are enabled. Its new companion
+output is **`*_dispatch.csv`**. Each `dispatch` event contains:
+
+- `emulated_ms`: guest PIC time before the indirect jump
+- `cs, ds, ds_base`: execution and task-data segments
+- `task_offset` (ESI), `task_linear`, `next_offset`
+- `remaining`: signed 16-bit countdown **after** decrement
+- `handler_eip`: `DWORD DS:[ESI+0x1C]`, the actual near-jump
+  callback target within CS 0180
+- `ebp, edi`: restored task context registers
+- `dropped_count`: diagnostic of any callback buffer overflows
+  (explicit `overflow` rows)
+
+It captures **emulated seconds 30–150**, buffers at most 4096
+dispatches per emulated second and flushes once per second,
+reporting dropped rows rather than silently undercounting.
+This is not a per-instruction logger: it checks a known EIP
+with a cheap conditional during normal interpretation, and
+does not alter guest memory, PIT, IRQ schedule, VGA timing
+or MK2's executable.
+
+### Run, extract, analyze
+
+Update/compile the fork and repeat the already working
+normal-core 40,000-cycle signal-watch launcher. The same run
+will produce both `*_signal.csv` and `*_dispatch.csv`:
+
+```powershell
+cd "$env:USERPROFILE\Documents\dosbox-staging"
+git switch mk2-timing-research
+git pull --ff-only
+cmake --build --preset=release-windows --parallel 8
+
+# Use your existing MK2 launch script with:
+# $env:DOSBOX_MK2_SIGNAL_WATCH = "1"
+# $env:DOSBOX_MK2_TRACE = a unique MK2Timing .csv file
+# --set "core=normal" --set "cpu_cycles_protected=40000"
+
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_dispatch.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $latest) {
+    Write-Host "No _dispatch.csv: check build and opt-in flags"
+} else {
+    python scripts/analyze_mk2_dispatch_trace.py "$($latest.FullName)"
+}
+```
+
+This avoids depending on `DOSBOX_MK2_TRACE` remaining set
+after a launcher cleans environment variables, and does not
+use PowerShell-specific `-LeafBase`.
+
+**Validation status:** The newly added dispatcher diagnostic
+has **not yet been compiled or tested on Windows**.
+The producer and task-dispatcher instruction *disassemblies*
+have been verified from the user's private binaries.
+
+**Next interpretation step:** Group callback destinations
+by `handler_eip` across gameplay and menus; determine which
+individual callback actually updates character positions,
+animation frames, inputs or combat collision before interpreting
+its recurrence as MK2's game simulation rate. Do not assume
+every 60-Hz counter update corresponds to one simulation step.
+
+### 2026-11-10: private snapshots of callback entry code (`*_dispatch_code.csv`)
+
+Analysis of actual `mk2_normal_40000_20261110_174841_dispatch.csv`
+found **17,403 task dispatches, 20 task nodes and 126 unique
+callback target EIPs**; there were **no overflow rows**.
+Two nodes (`0x276A8C` and `0x276774`) normally dispatch
+at ~60 Hz, with major targets `0x2133B5` and
+`0x22047D`; but their actual **combat logic role remains
+unverified**. See the latest findings section for
+cross-correlation with the ~70.09-Hz VGA stream.
+
+A new, **default-off diagnostic on the same existing
+signal-watch launcher**, records the first 256 bytes
+at each of up to **14 predefined callback targets**
+only when their dynamic `JMP [ESI+0x1C]` dispatch actually
+occurs. Additional local file:
+`*_dispatch_code.csv`. It can be extracted using the same
+`scripts/extract_mk2_guest_code.py` command as the earlier
+snapshots; the result contains private snippets from the
+user's own loaded MK2, **not distributable assets**.
+
+After `git pull --ff-only`, rebuilding and executing the
+previous working MK2 normal-core 40k launcher with
+`DOSBOX_MK2_SIGNAL_WATCH=1` and a unique
+`DOSBOX_MK2_TRACE` path:
+
+```powershell
+# Run from the DOSBox Staging repository root.
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_dispatch_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -eq $latest) {
+    Write-Host "No dispatch code found; check build and environment flags"
+} else {
+    python scripts/extract_mk2_guest_code.py "$($latest.FullName)"
+}
+```
+
+The output can contain fewer than 14 sites if the user
+never entered a phase executing a particular callback.
+The extractor prints `ndisasm -b 32 -o <guest EIP>`
+commands; **do not** interpret partial snapshots as
+complete functions. The objective is to identify actual
+game-state updates, not to assign simulation rate based
+on callback frequency alone.
+
+**Status:** this new callback code sampler has been
+committed but not yet compiled/runtime-validated on Windows.
+It must not be used for host FPS benchmarks.
+
+### New 18:21 capture: 14 callbacks decoded; sample candidate object state next
+
+The user uploaded the complete twelve-stream
+`mk2_normal_40000_20261110_182156` capture,
+including all **14 private 256-byte callback code
+slices**. The local x86 disassembly now confirms:
+
+- `0x2133B5` reads two dynamic object pointers from
+  `DS:[0x2B5FC2]` / `DS:[0x2B6146]` and invokes
+  `0x21374A` once for each object.
+- `0x22047D` compares signed WORD values from
+  `[object+0x1A]` for both objects, calculates the
+  midpoint of the two values, and checks global
+  position bounds. This suggests positional/camera
+  or framing work but **does not prove physics**.
+- The earlier phase callback `0x2239B2` reads
+  a masked bitfield from the IRQ producer's
+  shared pointer `DS:[DS:[0x27177C]+0x20]`
+  and updates its previous/current input-state fields.
+- The user-provided `_signal_code.csv` now proves
+  IRQ0's real-mode interrupt vector is
+  **`09B0:0000`**, with the work-counter
+  producer inside that segment at `09B0:08AF`.
+
+The newest fork commit extends the **same opt-in**
+`*_dispatch.csv` with 8 observation columns:
+`object_a_valid`, `object_a_pointer`,
+`object_a_field_1a`, `object_a_field_1e`,
+and equivalent fields for candidate object B.
+Each is sampled **before the dispatch** using
+the *actual DS base*, only during the 30–150s
+diagnostic window. The fields are 16-bit and
+we use signed integers, but their semantics
+and the structures' player identities
+are not established yet.
+
+The first 14 callback entry code samples remain
+in `*_dispatch_code.csv`. It will now also
+capture 8 private, one-time **helper candidates**
+(including **`0x21374A`** and `0x2136F6`)
+with `helper_candidate_` prefixes. A helper
+snapshot proves that its code is present in
+guest memory, not that the helper actually ran.
+
+### Run next object-field timing comparison
+
+Rebuild branch `mk2-timing-research` and
+run the existing PowerShell launcher with:
+`core=normal`, `cpu_cycles_protected=40000`,
+`DOSBOX_MK2_TRACE=<unique CSV path>`
+and `DOSBOX_MK2_SIGNAL_WATCH=1`.
+
+The same run produces `*_dispatch.csv`
+and `*_dispatch_code.csv`.
+
+```powershell
+# Run from the repository root after DOSBox exits.
+$folder = "$env:USERPROFILE\Documents\MK2Timing"
+$dispatch = Get-ChildItem $folder -Filter "*_dispatch.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+$code = Get-ChildItem $folder -Filter "*_dispatch_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $dispatch) {
+    python scripts/analyze_mk2_dispatch_trace.py "$($dispatch.FullName)"
+    python scripts/analyze_mk2_object_trace.py "$($dispatch.FullName)"
+}
+if ($null -ne $code) {
+    python scripts/extract_mk2_guest_code.py "$($code.FullName)"
+}
+```
+
+The new object analyzer requires a **NEW**
+`_dispatch.csv`: it explicitly refuses older
+traces missing the 8 object-state columns.
+It reports object field-change intervals
+and which callback was dispatched immediately
+before the change was first observed, **not
+the actual store instruction EIP**.
+A stationary object may show zero changes
+even while its logic is running.
+
+**Status:** object-state sampler and helper
+capture have been committed but still need
+Windows compilation and runtime validation.
+No timing controls, guest memory, or MK2
+executable are modified.
+
+### 2026-11-10: direct writer attribution for MK2 candidate object fields
+
+A fresh user-provided `analyze_mk2_object_trace.py` output
+from `mk2_normal_40000_20261110_210131_dispatch.csv`
+contains **24,072** dispatches, **1,485** observed
+changes in candidate object A and **503** in object B.
+Both have median change spacing **16.652 ms**.
+`0x2133B5` is the **previous scheduled callback**
+before 1,021 A changes and 348 B changes, but
+this is a temporal correlation, **NOT a proven
+writer**.
+
+The existing `scripts/analyze_mk2_object_trace.py`
+has also been updated: previously it reported
+zero pointer changes despite two observed
+pointer values per object. The reason was
+`previous=None` after invalid samples,
+which masked switches across those gaps.
+It now compares against the last valid pointer
+and reports separately whether a change
+occurred across an invalid-sample gap,
+without inventing the exact transition time.
+You can rerun the same old `_dispatch.csv`
+through this corrected script to see the fix;
+no new game capture is required for that.
+
+**NEW diagnostic** in `src/hardware/mk2_signal_probe.h`
+uses the existing `Mk2SignalBeforeWrite`/
+`Mk2SignalAfterWrite` guest-store hooks to
+monitor only four 16-bit fields:
+
+- candidate object A at `+0x1A` and `+0x1E`
+- candidate object B at `+0x1A` and `+0x1E`
+
+The object pointers are refreshed at every
+confirmed `0180:00205531` dispatch. A store
+overlapping a watched field produces a row
+**only if its WORD value changed** in the
+new `*_object_writes.csv` file:
+
+`emulated_ms`, `object`, `field_offset`,
+`object_pointer`, `object_linear`,
+`field_linear`, `store_linear`,
+`store_size`, `before`, `after`,
+`writer_cs`, `writer_cs_base`,
+`writer_eip`, `writer_ds`,
+`writer_ds_base`, `protected_mode`.
+
+This captures the guest **instruction
+responsible for the observed store**, instead
+of assuming it was the scheduler's preceding
+callback. It does NOT observe uninstrumented
+native/direct-memory writes or all aliases.
+It may miss writes while an object pointer
+is being swapped before the next dispatcher
+refresh. The watch is default-off along with
+the existing signal instrumentation and
+modifies no guest memory or timing values.
+Its performance data are not suitable as
+a benchmark.
+
+After rebuilding the latest branch, run
+the same normal-core MK2 launcher with
+`cpu_cycles_protected=40000`,
+`DOSBOX_MK2_SIGNAL_WATCH=1` and
+`DOSBOX_MK2_TRACE` set to a unique file
+in `Documents/MK2Timing`. The same run
+will generate the new `*_object_writes.csv`
+alongside existing trace outputs.
+
+```powershell
+# Run in the DOSBox Staging repository after MK2 exits.
+$folder = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem "$folder" -Filter "*_object_writes.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_object_writes.py "$($latest.FullName)"
+} else {
+    Write-Host "No _object_writes.csv: update/rebuild and rerun the opt-in probe."
+}
+```
+
+Upload the new `*_object_writes.csv` and the
+analyzer output. Compare the dominant writer
+CS:EIP with the privately captured
+`0x21374A` helper code. Only after
+tracing the actual writer chain and
+confirming live game-state transitions
+can we establish a true combat simulation
+step cadence, instead of merely an
+IRQ0-based task scheduler.
+
+**Status:** This additional writer watch has
+been committed, but still requires a
+Windows compile and runtime validation.
+
+### NEW: exact writer-code origin for candidate object fields
+
+The first `*_object_writes.csv` summary (user-provided stdout,
+raw CSV not yet uploaded) found **4,958 changed guest
+stores**, all in protected mode. Two guest instruction
+EIPs account for **4,889 = 98.61%**:
+
+- `0180:002315B1`: 2,514 writes, primarily the
+  candidate objects' signed WORD field `+0x1A`
+- `0180:002315B7`: 2,375 writes, primarily
+  signed WORD `+0x1E`
+
+Their instructions are only **6 bytes apart**.
+The observed value-change medians of ~20.8–21.0 ms
+are **conditional field-change rates**, not proof
+of a game-simulation step rate or 48 FPS.
+
+The latest **default-off** source instrumentation
+creates `*_object_writer_code.csv`, capturing
+one 256-byte snapshot **at** each writer EIP
+and another starting 48 bytes before each
+writer EIP. All four code fragments come
+directly from the user's executing MK2 memory
+when the first actual changed store is observed.
+The EIP-aligned snapshots can be decoded from
+their beginning; the preceding-context snapshots
+may start mid-instruction and require careful
+alignment. No bytes or assets from MK2 are
+committed to this repository.
+
+### Run next private writer-code capture
+
+Update and build the `mk2-timing-research`
+branch, then use the existing successful
+`core=normal`, `cpu_cycles_protected=40000`
+launch script with
+`DOSBOX_MK2_SIGNAL_WATCH=1` and
+`DOSBOX_MK2_TRACE=<unique .csv>`.
+Only run the diagnostic after a Windows build
+of the latest commit. The current change is
+**not yet Windows runtime validated**.
+
+After MK2 exits, while in the repo folder:
+
+```powershell
+$folder = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem $folder -Filter "*_object_writer_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $latest) {
+    python scripts/extract_mk2_guest_code.py "$($latest.FullName)"
+} else {
+    Write-Host "No object writer snapshots. Rebuild and rerun."
+}
+```
+
+Upload the small `*_object_writer_code.csv`
+and ideally also the contemporaneous
+`*_object_writes.csv`. They remain private
+research files outside GitHub. Disassemble
+`writer_at_002315B1` and
+`writer_at_002315B7` first, then inspect
+control flow and compare with the
+`0x21374A` callback helper to identify
+whether their function actually implements
+per-object motion or another state update.
+Do not equate field-change frequency or
+scheduler cadence with a proven combat tick.
+
+### Confirmed x86 position integration: record whole-DWORD ADD cadence
+
+The user-provided four 256-byte private MK2 code
+snapshots have been inspected and byte-aligned.
+The **actual guest writer instructions** are:
+
+- `0180:002315B1`: 32-bit addition to
+  `DWORD [EBP+0x18]` using increment
+  loaded from `DWORD [EBP+0x10]`
+- `0180:002315B7`: 32-bit addition to
+  `DWORD [EBP+0x1C]` using increment
+  loaded from `DWORD [EBP+0x14]`
+
+The prior watched WORD fields `+0x1A` and
+`+0x1E` are the **upper 16-bit halves**
+of these 32-bit accumulators. Accordingly
+the conditional median spacing of upper-word
+changes (~20.8–21.0ms) is NOT the rate
+at which the movement integrator runs.
+The data are strongly compatible with a
+**two-axis 16.16 fixed-point position**,
+but the exact fields' semantic names,
+units and object identity require validation.
+
+A new default-off companion output
+`*_object_steps.csv` records **every
+guest ADD DWORD store at these two known
+EIPs** to either dynamically watched object,
+including when the high WORD remains unchanged
+or the increment is zero. It records full
+DWORD before/after, EBX, expected modulo-
+2^32 delta, signed high words, EBP and PIC time.
+It runs under the *existing*
+`DOSBOX_MK2_TRACE` + `DOSBOX_MK2_SIGNAL_WATCH=1`
+conditions and leaves the game/timers unchanged.
+
+```powershell
+# Update and build the research branch, then run the
+# same successful core=normal, 40000-cycle MK2 launcher.
+# After closing DOSBox, from the repo root:
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_object_steps.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_object_steps.py "$($latest.FullName)"
+}
+```
+
+The analyzer groups observations by object pointer
+and 32-bit axis offset, reports per-group
+ADD-to-ADD spacing and distinguishes high-WORD
+changes from fraction-only and zero-increment
+stores. It verifies `(new_raw32 - old_raw32)
+mod 2^32 == EBX` for each recorded ADD.
+The code **has not yet been compiled or
+runtime-tested on Windows**.
+
+This can quantify the **movement-integration
+instruction rate** for these candidate
+objects. It is NOT in itself the full combat
+simulation tick unless corroborated with
+input, hit tests, animations and actual
+per-tick state transitions.
+
+### 22:27 raw-stream comparison: both observed movement phases follow IRQ0
+
+The user uploaded **all 15 actual CSVs** from
+`mk2_normal_40000_20261110_222749`. Comparing
+the full-DWORD movement ADD timestamps in
+`*_object_steps.csv` to **producer IRQ0
+timestamps** in `*_signal.csv` demonstrates
+a mean ~**60Hz** motion integration cadence
+for both the first and principal object pairs.
+
+Do **not** infer an alternate ~70Hz engine
+step from the early-pair interval median
+of ~13.8–14.0ms! Intervals strongly
+alternate ~11–13 and ~20–22ms. Two
+consecutive interval lengths have median
+~33.305ms, in agreement with **two
+16.652ms PIT ticks**. Time-span frequency
+is ~60.10Hz for each early object and
+~60.049Hz for the principal objects.
+
+Every recorded `+0x18` ADD of a
+given watched object corresponds to a
+**distinct preceding producer IRQ0 tick**,
+with no duplicates. The initial pair
+covers 368 consecutive ticks; the
+principal pair covers 4,636 ticks with
+one absent tick at emulated 97.582s,
+where the producer and consumer continue,
+but principal task callbacks temporarily
+disappear and sampled object pointers
+become zero during a state transition.
+
+VGA output is separate: median scanout
+spacing **14.268ms (~70.09Hz)**,
+**8,145 scanouts**, **3,199 visible
+changes**, **4,946 repeats**.
+The `_frames` visible hash matches
+`_scanmem` on **8,145/8,145** rows;
+`_lines` agrees with renderer cache
+on **56,000/56,000** samples.
+
+A correction to the early code hypothesis:
+`0x21374A` (previously a candidate
+position integrator) actually scans
+object extents and calculates bounds.
+The private callback code at `0x230101`
+and `0x22FB58` calls `0x23156C`,
+close to the confirmed ADD writer
+instructions `0x2315B1`/`0x2315B7`.
+The intervening control path has not
+been decoded fully.
+
+See the newest dated findings section
+for numeric cross-stream verification,
+the transition exception and limitations.
+**This establishes the sampled object
+movement-integration clock, not
+a universal combat simulation tick.**
+Do not alter timing parameters based on
+a per-event median or equate image hash
+changes with game-state updates.
+
+### Dynamic movement-helper entry probe (guest 0180:0023156C)
+
+The latest experiment follows `CALL 0x23156C` observed
+in the user's own private MK2 32-bit callback disassembly.
+The previously identified helper `0x21374A` traverses
+object bounds; it is **not** the movement integrator.
+The 32-bit integration ADDs at `0x2315B1/0x2315B7`
+remain the verified writers, observed once per IRQ0 tick
+per object on average. We are now measuring the
+**actual entry** into the candidate shared helper
+and seeking caller evidence.
+
+After pulling the `mk2-timing-research` branch
+and compiling, the existing normal-core 40,000-cycle
+launcher with `DOSBOX_MK2_SIGNAL_WATCH=1`
+and a unique `DOSBOX_MK2_TRACE` file will also
+write `*_movement_entry.csv`, with the actual
+`0180:0023156C` entry timestamp, registers,
+DS/SS segment bases, current two object pointers
+and the stack top DWORD as a **return address
+candidate**. A separate snapshot
+`helper_candidate_0023156C` appears in the
+private `*_dispatch_code.csv`. No game
+binary modifications or timing parameter changes
+are introduced.
+
+```powershell
+# Execute in the DOSBox Staging repository after running MK2
+$dir = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem $dir -Filter "*_movement_entry.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_movement_entry.py "$($latest.FullName)"
+}
+```
+
+The script will automatically compare matching
+`*_signal.csv` IRQ0 event timestamps and
+`*_object_steps.csv` full-DWORD ADD events
+from the *same run* when present. Upload
+`*_movement_entry.csv`, `*_dispatch_code.csv`
+and ideally those companion CSVs for the next
+step. The entry recorder only identifies *entry
+occurrences*. A DWORD at SS:ESP does not
+automatically prove a caller (a JMP may
+enter without pushing a return address),
+and an entry cadence is not automatically
+all of combat's simulation rate.
+
+Historical caveat: VGA standard 320x200
+hardware scanned near 70Hz, while DOS
+software could reprogram the PIT0 IRQ cadence
+(default PC BIOS ~18.2065Hz) for a logic
+clock of its own. This can explain a ~60Hz
+movement system and ~70Hz scanout without
+implying ~70 new game-rendered frames
+per second. We do not have a verified
+Mortal Kombat II developer account of why
+its DOS conversion used this design.
+
+**Validation status:** source changes committed,
+**not yet compiled or runtime-validated on Windows**.
+
+## Source hooks
+
+- `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
+- `src/hardware/pic.cpp`: IRQ0 dispatches to the emulated CPU.
+- `src/hardware/video/vga_misc.cpp`: port 3DAh reads and vertical retrace bit.
+- `src/hardware/video/vga_draw.cpp`: one call per emulated vertical refresh.
+- `src/hardware/mk2_timing_probe.h`: low-overhead counters and CSV writer.
+- `src/hardware/video/vga_memory.cpp`: per-write, read-only VGA page-handler callbacks and coverage mode.
+- `src/hardware/mk2_vram_probe.h`: 1 ms write-event timeline, IRQ0/VGA/scanout correlation and CSV writer.
+- `src/hardware/mk2_vga_regs_probe.h`: per-register emulated-timestamp CSV (`_regs.csv`).
+- `src/hardware/mk2_scanmem_probe.h`: raw/fastmem and effective VGA palette boundary hashes, `_scanmem.csv`.
+- `src/hardware/mk2_scanline_probe.h`: sparse line-level source indices, effective palette, VGA RGB and renderer-cache row fingerprints, `_lines.csv`.
+- `src/hardware/mk2_guest_probe.h`: opt-in CPU register/CS:EIP samples at IRQ0, VGA status reads, write-burst starts and scheduler ticks (`_guest.csv`).
+- `scripts/analyze_mk2_guest_trace.py`: offline code-location clustering and event summaries (Python standard library only).
+- `scripts/extract_mk2_guest_code.py`: turn locally captured 64-byte code snapshots into private binaries; do not commit generated code data.
+- `src/hardware/mk2_signal_probe.h`: normal-core, DS-resolved writer watchpoint with `_signal.csv` output.
+- `src/cpu/paging.h`: opt-in guarded checks around ordinary guest RAM stores.
+- `scripts/analyze_mk2_signal_trace.py`: compare producer and consumer events without assuming gameplay tick cadence.
+- `src/cpu/core_normal.cpp` and `src/hardware/mk2_signal_probe.h`: targeted read-only capture at instruction `0180:00205531` for the delayed-task indirect jump (`_dispatch.csv`).
+- `scripts/analyze_mk2_dispatch_trace.py`: group callback destinations and task recurrence in emulated time.
+- `src/hardware/mk2_signal_probe.h`: opt-in, one-time 256-byte private callback snapshots at 14 selected dispatched EIPs (`_dispatch_code.csv`).
+- `scripts/analyze_mk2_object_trace.py`: analyze candidate object +0x1A/+0x1E field deltas sampled immediately before each timed-task dispatch.
+- `scripts/analyze_mk2_object_writes.py`: attribute observed candidate object field STORE instructions to guest CS:EIP using new `_object_writes.csv` (not merely temporal correlation).
+- `src/hardware/mk2_signal_probe.h`: one-time private 256-byte writer-aligned and preceding-context snapshots at `0x2315B1`/`0x2315B7` in `_object_writer_code.csv`.
+- `scripts/analyze_mk2_object_steps.py`: report every captured 32-bit ADD integration step and separate fractional-only versus integer-coordinate changes (`_object_steps.csv`).
+- `src/cpu/core_normal.cpp` / `src/hardware/pic.cpp` / `src/hardware/mk2_signal_probe.h`: gated dynamic entry capture at guest `0180:0023156C` (`_movement_entry.csv`) and private helper code snapshot.
+- `scripts/analyze_mk2_movement_entry.py`: analyze same-run helper-entry cadence, candidate caller returns and correlation with IRQ0 and object DWORD additions.
+- `src/hardware/mk2_signal_probe.h`: add eight helper-candidate private snippets and candidate object fields to the same opt-in diagnostic streams.
+- `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
+- `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
+- `src/hardware/video/vga_crtc.cpp`: CRTC 0Ch/0Dh start-address programming events.
+- `src/hardware/video/vga_attr.cpp`: attribute palette mapping and horizontal panning programming.
+- `src/hardware/video/vga_dac.cpp`: DAC RGB entry commits and PEL-mask changes.
+- `src/gui/render/render.cpp`: completed source-frame sampling after source latch.
+- `src/gui/render/mk2_frame_probe.h`: frame and visible-palette fingerprints, per-scanout CSV.
+
+The instrumentation is global to DOSBox when enabled, not tied to an MK2
+executable hash. Use it for MK1/MK3 comparisons too. Avoid treating the
+early DOS prompt rows as MK2 gameplay measurements.
+
+## Validation and limits
+
+The PIT/VGA CSV implementation was previously built and exercised by the user
+on Windows. **The five-stream integration, including the VGA register
+and scanout-memory probes, has now been built and runtime-validated on the
+user's Windows machine in the 2026-11-10 capture.** This verifies recording
+and cross-file alignment; it does not establish the accuracy of every sampled
+guest memory access or a cause for MK2's pacing.
+
+Time-counter overhead is minimized by counting in hot paths and writing once
+per emulated second. Frame tracing adds source-buffer and per-region fingerprints for each
+completed scanout (typically ~70 per second), and buffers CSV writes;
+nonzero measurement overhead remains. Always run
+a control test without tracing to check for behavioral changes.
+
+If the game never reaches its expected emulated frame rates, compare
+`window_host_ms` to `window_emulated_ms`; a host that takes much longer than
+the emulated interval may not keep up. If rates remain consistent at all three
+cycle settings, the next step is instrumenting the game's simulation-update
+routine, **not** changing PIT or VGA timing blindly.
+
+## Direct launch without DOS MOUNT commands
+
+DOSBox Staging accepts a host-side `.EXE` path as a **positional argument**;
+it mounts the containing directory as C: and runs the executable automatically.
+This is preferable to quoting `MOUNT` inside repeated `-c` arguments.
+
+From PowerShell after rebuilding the latest branch, set the environment variable
+and run your compiled DOSBox with an absolute `MK2.EXE` path:
+
+```powershell
+$env:DOSBOX_MK2_TRACE = "$env:USERPROFILE\Documents\MK2Timing\mk2_40000.csv"
+& 'C:\Users\Usuario\Documents\dosbox-staging\build\release-windows\dosbox.exe' --noautoexec --set 'cpu_cycles_protected=40000' 'D:\GoG\Mortal Kombat 2\MK2.EXE'
+```
+
+Adjust the actual executable locations. The destination directory must exist.
+If the CSV has only the header or unexpectedly few rows, compare the emitted
+`window_host_ms` and `window_emulated_ms` values, and ensure the executable
+was rebuilt with the latest `mk2-timing-research` commits.

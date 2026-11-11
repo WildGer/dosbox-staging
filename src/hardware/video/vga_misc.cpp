@@ -8,6 +8,8 @@
 
 #include "vga.h"
 
+#include "hardware/mk2_timing_probe.h"
+#include "hardware/mk2_guest_probe.h"
 #include "hardware/pic.h"
 #include "hardware/port.h"
 
@@ -19,7 +21,8 @@ uint8_t vga_read_p3d5(io_port_t port, io_width_t);
 uint8_t vga_read_p3da(io_port_t, io_width_t)
 {
 	uint8_t retval = 4; // bit 2 set, needed by Blues Brothers
-	const auto timeInFrame = PIC_FullIndex() - vga.draw.delay.framestart;
+	const auto now_ms = PIC_FullIndex();
+	const auto timeInFrame = now_ms - vga.draw.delay.framestart;
 
 	vga.attr.is_address_mode = true;
 	vga.tandy.pcjr_flipflop=false;
@@ -40,6 +43,8 @@ uint8_t vga_read_p3da(io_port_t, io_width_t)
 			retval |= 1;
 		}
 	}
+	Mk2TimingProbe::Get().OnVgaStatusRead(retval);
+	Mk2GuestProbe::Get().OnVgaStatus(retval, now_ms);
 	return retval;
 }
 

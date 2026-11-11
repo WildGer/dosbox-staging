@@ -11,6 +11,12 @@
 #include "debugger/debugger.h"
 #include "hardware/memory.h"
 
+// Experimental, disabled by default. Definitions live in pic.cpp; only
+// monitored guest stores call the expensive watchpoint path.
+extern bool Mk2SignalWatchActive;
+bool Mk2SignalBeforeWrite(PhysPt address, uint8_t size);
+void Mk2SignalAfterWrite();
+
 // disable this to reduce the size of the TLB
 // NOTE: does not work with the dynamic core (dynrec is fine)
 #define USE_FULL_TLB
@@ -358,36 +364,48 @@ static inline uint64_t mem_readq_inline(PhysPt address)
 
 static inline void mem_writeb_inline(PhysPt address, uint8_t val)
 {
+	const bool watched = Mk2SignalWatchActive &&
+	                     Mk2SignalBeforeWrite(address, 1);
 	HostPt tlb_addr = get_tlb_write(address);
 	if (tlb_addr) host_writeb(tlb_addr+address,val);
 	else (get_tlb_writehandler(address))->writeb(address,val);
+	if (watched) Mk2SignalAfterWrite();
 }
 
 static inline void mem_writew_inline(PhysPt address,uint16_t val) {
 	if ((address & 0xfff)<0xfff) {
+		const bool watched = Mk2SignalWatchActive &&
+		                     Mk2SignalBeforeWrite(address, 2);
 		HostPt tlb_addr=get_tlb_write(address);
 		if (tlb_addr) host_writew(tlb_addr+address,val);
 		else (get_tlb_writehandler(address))->writew(address,val);
+		if (watched) Mk2SignalAfterWrite();
 	} else mem_unalignedwritew(address,val);
 }
 
 static inline void mem_writed_inline(PhysPt address,uint32_t val) {
 	if ((address & 0xfff)<0xffd) {
+		const bool watched = Mk2SignalWatchActive &&
+		                     Mk2SignalBeforeWrite(address, 4);
 		HostPt tlb_addr=get_tlb_write(address);
 		if (tlb_addr) host_writed(tlb_addr+address,val);
 		else (get_tlb_writehandler(address))->writed(address,val);
+		if (watched) Mk2SignalAfterWrite();
 	} else mem_unalignedwrited(address,val);
 }
 
 static inline void mem_writeq_inline(PhysPt address, uint64_t val)
 {
 	if ((address & 0xfff) < 0xff9) {
+		const bool watched = Mk2SignalWatchActive &&
+		                     Mk2SignalBeforeWrite(address, 8);
 		HostPt tlb_addr = get_tlb_write(address);
 		if (tlb_addr) {
 			host_writeq(tlb_addr + address, val);
 		} else {
 			(get_tlb_writehandler(address))->writeq(address, val);
 		}
+		if (watched) Mk2SignalAfterWrite();
 	} else {
 		mem_unalignedwriteq(address, val);
 	}

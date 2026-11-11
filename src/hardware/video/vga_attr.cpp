@@ -5,6 +5,7 @@
 #include "dosbox.h"
 #include "hardware/port.h"
 #include "vga.h"
+#include "hardware/mk2_vga_regs_probe.h"
 
 #include "ints/int10.h"
 
@@ -78,6 +79,8 @@ void VGA_ATTR_SetPalette(uint8_t palette_reg_idx, const PaletteRegister value)
 
 	// Apply
 	VGA_DAC_CombineColor(palette_reg_idx, color_reg_idx);
+	Mk2VgaRegsProbe::Get().OnAttrPaletteWrite(
+	        palette_reg_idx, value.index, color_reg_idx);
 }
 
 static uint8_t read_p3c0(io_port_t, io_width_t)
@@ -234,6 +237,8 @@ static void write_p3c0(io_port_t, io_val_t value, io_width_t)
 				// every scanline:
 				vga.draw.panning = vga.config.pel_panning;
 			}
+			Mk2VgaRegsProbe::Get().OnPanningWrite(
+			        val, vga.config.pel_panning, vga.draw.panning);
 			//      0-3	Indicates number of pixels to shift the
 			// display left Value  9bit textmode   256color mode
 			//  Other modes 0          1               0 0 1 2 n/a 1

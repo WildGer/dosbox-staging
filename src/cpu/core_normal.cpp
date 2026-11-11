@@ -17,6 +17,14 @@
 
 #include "simde/x86/mmx.h"
 
+// Experimental MK2 signal probe: cheap default-off branch. The expensive
+// memory check runs only in brief windows armed after selected IRQ0 events.
+extern bool Mk2SignalInstructionActive;
+extern bool Mk2SignalWatchActive;
+void Mk2SignalOnInstructionBoundary();
+void Mk2SignalOnTaskDispatch();
+void Mk2SignalOnMovementFunctionEntry();
+
 #if C_DEBUGGER
 #include "debugger/debugger.h"
 #endif
@@ -133,6 +141,22 @@ static inline uint32_t Fetchd() {
 Bits CPU_Core_Normal_Run() noexcept
 {
 	while (CPU_Cycles-->0) {
+		if (Mk2SignalInstructionActive) {
+			Mk2SignalOnInstructionBoundary();
+		}
+		// Just one additional conditional in the default-disabled path;
+		// read the task node only at the independently decoded indirect
+		// near jump within MK2's protected-mode delayed-work dispatcher.
+		if (Mk2SignalWatchActive && cpu.pmode &&
+		    SegValue(cs) == 0x0180u) {
+			if (reg_eip == 0x00205531u) {
+				Mk2SignalOnTaskDispatch();
+			} else if (reg_eip == 0x0023156cu) {
+				// Dynamic entry into a candidate shared movement helper.
+				// No guest CPU state or timing is modified here.
+				Mk2SignalOnMovementFunctionEntry();
+			}
+		}
 		LOADIP;
 		core.opcode_index=cpu.code.big*0x200;
 		core.prefixes=cpu.code.big;

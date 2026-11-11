@@ -1,66 +1,53 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 
-function(add_to_copy_command SOURCE DESTINATION)
+# Copy each resource independently. The old implementation appended hundreds
+# of copy commands to a single custom command, which is fragile on Windows
+# with MSBuild and makes failures difficult to isolate.
+#
+# Ensure destination directories exist: CMake's copy_if_different copies files
+# but does not create arbitrary nested destination directories.
+function(add_asset_copy_rule SOURCE DESTINATION)
+  get_filename_component(DESTINATION_DIRECTORY "${DESTINATION}" DIRECTORY)
+
   add_custom_command(
-    OUTPUT  ${ASSET_DESTINATION_FILES}
-    DEPENDS "${SOURCE}"
+    OUTPUT "${DESTINATION}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${DESTINATION_DIRECTORY}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${SOURCE}" "${DESTINATION}"
-    APPEND
+    DEPENDS "${SOURCE}"
+    COMMENT "Copying asset ${DESTINATION}"
+    VERBATIM
   )
 endfunction()
 
-
 function(add_copy_assets)
-
-  # Generate list of resource files
   file(GLOB_RECURSE RESOURCE_FILES
        RELATIVE "${CMAKE_SOURCE_DIR}/${RESOURCES_PATH}"
        "${CMAKE_SOURCE_DIR}/${RESOURCES_PATH}/*")
-  # Filter out Git files
-  list(FILTER RESOURCE_FILES EXCLUDE REGEX "(.*/)*\.git[a-z]+$")
 
-  # Generate list of resource files with destination paths
-  foreach(RESOURCE_FILE ${RESOURCE_FILES})
-    list(APPEND RESOURCE_DESTINATION_FILES
-         "${CMAKE_CURRENT_BINARY_DIR}/${RESOURCE_COPY_PATH}/${RESOURCE_FILE}")
+  # Exclude repository metadata files when copying resources.
+  list(FILTER RESOURCE_FILES EXCLUDE REGEX "(.*/)*\\.git[a-z]+$")
+
+  set(ASSET_DESTINATION_FILES "")
+
+  foreach(RESOURCE_FILE IN LISTS RESOURCE_FILES)
+    set(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${RESOURCES_PATH}/${RESOURCE_FILE}")
+    set(DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/${RESOURCE_COPY_PATH}/${RESOURCE_FILE}")
+    add_asset_copy_rule("${SOURCE}" "${DESTINATION}")
+    list(APPEND ASSET_DESTINATION_FILES "${DESTINATION}")
   endforeach()
 
-  # Generate list of license files with destination paths
-  foreach(LICENSE_FILE ${LICENSE_FILES})
-    list(APPEND LICENSE_DESTINATION_FILES
-         "${CMAKE_CURRENT_BINARY_DIR}/doc/${LICENSE_FILE}")
-  endforeach()
-  list(APPEND LICENSE_DESTINATION_FILES ${CMAKE_CURRENT_BINARY_DIR}/doc/LICENSE)
-
-  # Create initial (dummy) command for copying the assets
-  set(ASSET_DESTINATION_FILES
-      ${LICENSE_DESTINATION_FILES}
-      ${RESOURCE_DESTINATION_FILES})
-  add_custom_command(OUTPUT ${ASSET_DESTINATION_FILES})
-
-  # Add a copy command for each resource file
-  foreach(RESOURCE_FILE ${RESOURCE_FILES})
-    add_to_copy_command(
-      "${CMAKE_CURRENT_SOURCE_DIR}/${RESOURCES_PATH}/${RESOURCE_FILE}"
-      "${CMAKE_CURRENT_BINARY_DIR}/${RESOURCE_COPY_PATH}/${RESOURCE_FILE}"
-    )
+  foreach(LICENSE_FILE IN LISTS LICENSE_FILES)
+    set(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${LICENSE_FILE}")
+    set(DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/doc/${LICENSE_FILE}")
+    add_asset_copy_rule("${SOURCE}" "${DESTINATION}")
+    list(APPEND ASSET_DESTINATION_FILES "${DESTINATION}")
   endforeach()
 
-  # Add a copy command for each license file
-  foreach(LICENSE_FILE ${LICENSE_FILES})
-    add_to_copy_command(
-      "${CMAKE_CURRENT_SOURCE_DIR}/${LICENSE_FILE}"
-      "${CMAKE_CURRENT_BINARY_DIR}/doc/${LICENSE_FILE}"
-    )
-  endforeach()
+  set(MAIN_LICENSE_DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/doc/LICENSE")
+  add_asset_copy_rule("${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+                      "${MAIN_LICENSE_DESTINATION}")
+  list(APPEND ASSET_DESTINATION_FILES "${MAIN_LICENSE_DESTINATION}")
 
-  # Add a copy command for the main license file
-  add_to_copy_command(
-    "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
-    "${CMAKE_CURRENT_BINARY_DIR}/doc/LICENSE"
-  )
-
-  # Add a target to copy the assets to the build directory
   add_custom_target(copy_assets ALL DEPENDS ${ASSET_DESTINATION_FILES})
   add_dependencies(dosbox copy_assets)
-
 endfunction()
