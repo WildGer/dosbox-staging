@@ -55,6 +55,8 @@ def main() -> None:
     valid = [r for r in rows if int(r["entry_eip"]) == 0x0023156C]
     overflow = [r for r in rows if int(r.get("dropped_count", 0)) != 0]
     by_return: Counter[int] = Counter()
+    times_by_return: dict[int, list[float]] = defaultdict(list)
+    entries_by_return: dict[int, list[dict[str, str]]] = defaultdict(list)
     by_obj_pair: dict[tuple[int, int], list[float]] = defaultdict(list)
     by_ebp: Counter[int] = Counter()
     by_eax: Counter[int] = Counter()
@@ -69,6 +71,8 @@ def main() -> None:
         ebp = int(r["entry_ebp"])
         eax = int(r["entry_eax"])
         by_return[ret] += 1
+        times_by_return[ret].append(now)
+        entries_by_return[ret].append(r)
         by_obj_pair[(ap, bp)].append(now)
         by_ebp[ebp] += 1
         by_eax[eax] += 1
@@ -84,8 +88,15 @@ def main() -> None:
 
     print("\nMost common stack DWORDs at function entry "
           "(possible return EIPs, not proven callers):")
+    verified_returns = {
+        0x0022FB5D: "CALL 0x22FB58 -> 0x23156C (verified from guest code)",
+        0x00230106: "CALL 0x230101 -> 0x23156C (verified from guest code)",
+    }
     for pc, n in by_return.most_common(args.top):
-        print(f"  0x{pc:08X}: {n:,} entries")
+        note = verified_returns.get(pc, "caller not yet verified")
+        print(f"  0x{pc:08X}: {n:,} entries, "
+              f"{n / len(valid) * 100:.2f}% of entries "
+              f"({note}); {intervals(times_by_return[pc])}")
 
     print("\nCurrent global object-pointer pairs at entry:")
     for (a, b), times in sorted(by_obj_pair.items(),
@@ -130,6 +141,21 @@ def main() -> None:
                 print(f"  Entry lag from preceding producer: "
                       f"median={median(lag):.3f} ms, "
                       f"min={min(lag):.3f}, max={max(lag):.3f}")
+            print("  Distinct IRQ0 producer intervals by return candidate:")
+            for pc, group in sorted(entries_by_return.items(),
+                                    key=lambda it: -len(it[1]))[:args.top]:
+                indices = [
+                    bisect_right(producer, float(row["emulated_ms"])) - 1
+                    for row in group
+                ]
+                selected = [i for i in indices if i >= 0]
+                multiples = Counter(selected)
+                print(
+                    f"    0x{pc:08X}: entries={len(group):,}, "
+                    f"IRQ0 intervals={len(multiples):,}, "
+                    f"intervals with 2+ entries="
+                    f"{sum(c > 1 for c in multiples.values()):,}"
+                )
         else:
             print("\nSignal CSV present, but no matching IRQ0 writes.")
     else:
@@ -156,6 +182,20 @@ def main() -> None:
             both = set(move_ticks) & set(ent_ticks)
             print(f"  IRQ0 intervals containing both an entry "
                   f"and an object ADD: {len(both):,}")
+            print("  Same-run integration overlap by return candidate "
+                  "(not proof of a direct caller -> ADD relationship):")
+            for pc, group in sorted(entries_by_return.items(),
+                                    key=lambda it: -len(it[1]))[:args.top]:
+                ticks = {
+                    bisect_right(producer, float(row["emulated_ms"])) - 1
+                    for row in group
+                }
+                ticks.discard(-1)
+                common = ticks & set(move_ticks)
+                print(f"    return=0x{pc:08X}: "
+                      f"entry IRQ0 intervals={len(ticks):,}, "
+                      f"with ADDs={len(common):,}, "
+                      f"without recorded ADDs={len(ticks - set(move_ticks)):,}")
             print("  Note: multiple objects may integrate per timer "
                   "interval; do not equate event counts directly.")
     else:
