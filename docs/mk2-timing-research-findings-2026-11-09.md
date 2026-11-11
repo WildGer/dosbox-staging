@@ -2150,8 +2150,167 @@ transition times and any correlation with
 VGA repeats. Only then pursue input/
 collision/animation update attribution.
 
+## 2026-11-10 22:27 raw 15-stream cross-clock analysis: movement IRQ0-locked, not VGA-locked
+
+**Source:** user uploaded the **actual 15 CSV streams** with
+prefix `mk2_normal_40000_20261110_222749` including
+`_object_steps`, `_signal`, `_dispatch`,
+`_frames`, `_scanmem`, `_lines`, `_guest`,
+`_object_writes`, `_regs`, `_vram`, both
+code streams, etc. All observations below were
+derived by **re-reading the raw uploaded rows**
+and cross-correlating emulated timestamps rather
+than trusting a console analyzer summary.
+
+### CRITICAL CORRECTION: the alternate phase is ALSO 60Hz
+
+The previously quoted ~**13.806/13.998 ms MEDIAN**
+of alternating/inactive object ADD-to-ADD gaps
+suggested an approximately VGA-like 70Hz cadence.
+**That interpretation is false.** Each group's
+individual gaps are bimodal (mostly 11–13ms and
+20–22ms), with very strong negative correlation
+between adjacent intervals, whose 2-gap sum
+is ~33.304ms, or **two 60.05-Hz IRQ0 ticks**.
+
+| Object pointer | Phase | Per-axis ADDs | First–last emulated ms | Average frequency | Median gap | IRQ0 unique ticks | Missed producer ticks |
+|---|---|---:|---|---:|---:|---:|---:|
+| A `0x2B88EC` | initial | 368 | 30,029.820–36,135.999 | **60.103 Hz** | 13.806ms | 368 | 0 |
+| B `0x2B8AFC` | initial | 368 | 30,029.626–36,135.999 | **60.101 Hz** | 13.998ms | 368 | 0 |
+| A `0x2B8104` | principal | 4,636 | 39,046.102–116,232.714 | **60.049 Hz** | 16.664ms | 4,636 | 1 |
+| B `0x2B815C` | principal | 4,636 | 39,045.906–116,232.714 | **60.049 Hz** | 16.664ms | 4,636 | 1 |
+
+Method: for each object pointer take only
+`_object_steps.csv` rows with
+`position_offset=24` (the `+0x18` ADD)
+to count **one integration step per object**;
+assign each event with binary search to the most
+recent `_signal.csv` producer
+`event=signal_write,writer_eip=2223`
+(guest `09B0:08AF`). In all four groups,
+**every recorded integration maps to a distinct
+IRQ0 producer tick: no duplicate tick IDs**.
+The two principal groups each have exactly
+**one intervening producer tick** with no
+observed integration. Initial groups have
+none. Per-axis `+0x1C` ADD occurs
+~0.00005ms after `+0x18`, as expected
+for two adjacent x86 instructions.
+
+For A initial, lag-1 autocorrelation of successive
+ADD intervals is **-0.9913**, and median
+of consecutive 2-gap sums **33.3056ms**.
+For A principal, lag-1 correlation **-0.9771**
+and 2-gap median **33.3038ms**.
+A producer IRQ0 period is ~**16.6521ms**,
+two periods ~**33.3042ms**. This striking
+short/long alternation explains why the
+individual-gap median is unreliable.
+The IRQ0-to-integration latency varies:
+some steps appear ~0.05–0.1ms after IRQ0,
+others ~4–6ms afterward. This is timing/
+scheduler phase variation in *emulated time*,
+not proof of a fundamentally different
+simulation clock.
+
+### Exception at exactly 97.582 seconds: a state transition, not lost IRQ
+
+The only missing main-phase producer interval
+is IRQ tick **97,582.015950ms**, bracketed
+by ticks **97,565.363825ms** and
+**97,598.668050ms**. The protected consumer
+cleared the pending counter after that IRQ
+normally at **97,582.035225ms**.
+The preceding main A ADD was at **97,565.433075**,
+and next at **97,605.111975** (39.679ms gap).
+Near 97,582–97,586ms the two ordinary
+main task nodes `0x276A8C` and `0x276774`
+are **not dispatched**, several other callbacks
+run, and their sampled global object pointers
+temporarily become **zero**. At ~97,600ms
+the main nodes return with transition target
+callbacks `0x2133AB` and `0x22045A`,
+then resume usual callbacks. The observed
+exception is therefore aligned with a
+game state/task scheduling transition, not
+missing IRQ0 delivery; it does not prove
+a generally skipped combat physics tick.
+
+The alternate objects stop at ~36.136s;
+primary ones begin at ~39.046s. Between
+them there are no observed ADDs for these
+four watched pointers. During this transition
+the work counter accumulates from 1 to 10
+and is cleared in one store at
+**39,040.032650ms**. This provides **no
+evidence that ten individual movement
+integrations were replayed**, nor
+enough evidence to generalize the engine's
+catch-up behavior.
+
+### VGA remains independently near 70.09Hz
+
+`_frames.csv`: **8,145 scanouts**,
+**3,199 visible-hash changes**, **4,946
+repeats**, scanout median spacing
+**14.268075ms**. All **8,145/8,145**
+visible hashes match `_scanmem.csv`'s
+`visible_image_hash` keyed by scanout index.
+`_lines.csv`: **56,000/56,000**
+`output_equals_cache=1`. During the
+principal movement period ~39.046–116.233s:
+**5,410 scanouts**, **2,622 visible changes**.
+A visible hash change cannot be equated
+to a movement update or full game frame;
+palettes, sprites, position and other
+state may affect it, with rendering/
+sampling phase delay.
+
+### UPDATED interpretation of code helper 0x21374A
+
+The actual 256-byte private snippet
+`helper_candidate_0021374A` in the
+uploaded `_dispatch_code.csv` was
+disassembled. It **iterates a per-object
+data chain and updates global minimum/
+maximum bounds using object fields**.
+It is NOT the identified 32-bit movement
+integrator. Correct the previous tentative
+classification of this helper as a possible
+physical coordinate integrator.
+
+Other same-run private callback snippets
+show **direct CALLs to `0x23156C`**
+from `0x230101` and from
+`0x22FB58` (within the `0x22FABF`
+snapshot). This code destination is
+close to the observed ADD instruction
+EIPs `0x2315B1`/`0x2315B7`
+and is a better prospective entry/
+dispatch point to decode, BUT the
+intervening indirect control flow
+has not yet been proven. No copyrighted
+binary bytes added to the repository.
+
+### Inference boundary / next investigation
+
+We now have *direct, source-grounded*
+evidence that the two tracked object
+position accumulators in both phases
+are integrated at mean approximately
+**60Hz and on distinct IRQ0 work ticks**.
+This does **not** establish that all
+input, hit detection, animation, timer
+and damage subsystems run at 60Hz.
+Focus next on actual per-fighter callback
+and collision/input state update
+functions; optionally capture code
+beginning at `0x23156C` and its
+computed jump target, without altering
+guest memory or clocks.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research in GitHub `WildGer/dosbox-staging` branch `mk2-timing-research`; read latest findings **2026-11-10 22:27: actual full-DWORD motion integration cadence confirmed**. Previous 16-bit real-mode IRQ0 09B0:08AF increments a pending DWORD at ~60.05Hz; protected-mode consumer 0180:2054AD clears it; task scheduler at 0180:205531 with main callbacks ~60Hz; VGA ~70.09Hz. User-provided disassembly of real 32-bit x86 code: 0180:002315B1 adds DWORD [EBP+0x10] to DWORD [EBP+0x18]; 0180:002315B7 adds DWORD [EBP+0x14] to DWORD [EBP+0x1C]. Watched object upper words +0x1A/+0x1E are high halves of likely signed 16.16 positions; e.g. increment 196608 = 3.0. Latest **user-supplied console output**, NOT raw CSV, from `mk2_normal_40000_20261110_222749_object_steps.csv`: **20,016 observed ADD stores**, 0 delta/EBX mismatches, 20,016 EBP=object-pointer matches. Exactly 10,008 ADD stores at each writer. For each of four (A/B, +0x18/+0x1C) primary object groups: **4,636 ADDs, median 16.664ms** (~60Hz), including stationary updates. Primary ptrs A=0x2B8104 B=0x2B815C. Four alternate groups A=0x2B88EC B=0x2B8AFC each **368 ADDs**, median 13.806ms for A, 13.998ms for B; all zero increments, phase unknown, cadence near VGA but NOT proven VGA locked. Total 18,544 primary +1,472 alternate ADDs. Of 20,016 stores **3,703 integer-high-WORD changes, 112 fractional-only, 16,201 zero-delta**, explaining old ~21ms conditional position change rate. This directly establishes near-60Hz **movement-integrator instruction execution** for primary objects; NOT proven entire combat simulation tick (input/collision/animation could differ). Spacings vary (primary 6.4-39.7ms). NEXT ask user to upload existing **same-run** raw `*_object_steps.csv`, `*_signal.csv`, `*_dispatch.csv`, `*_frames.csv` (prefix `mk2_normal_40000_20261110_222749`), compare actual timestamps and phases, no re-run. No copyrighted MK2 bytes in GitHub and never change executable/PIT/VGA timing.
+> Mortal Kombat II DOS timing research in `WildGer/dosbox-staging` branch `mk2-timing-research`. READ newest findings section **2026-11-10 22:27 raw 15-stream cross-clock analysis: movement IRQ0-locked, not VGA-locked**. User uploaded ACTUAL all 15 CSVs named `mk2_normal_40000_20261110_222749*.csv`, directly parsed and correlated. CRITICAL correction: alternate object phase does **NOT** run at 70Hz despite a misleading 13.8–14.0ms median individual interval; inter-step gaps strongly alternate ~11–13/~20–22ms, autocorrelation -0.991, 2-gap median 33.3056ms (2 IRQ0 ticks), mean rate **60.10Hz** for 368 steps per object in initial phase. Main two objects each show **4,636 steps per axis**, duration ~77.187s, mean **60.049Hz**, median 16.664ms but bimodal gaps and autocorrelation -0.977, 2-gap median 33.3038ms. Each full-DWORD movement ADD corresponds to a UNIQUE preceding IRQ0 producer tick (0 duplicates); initial phase has ZERO missed ticks and main phase has exactly ONE missing tick at IRQ0 **97582.015950ms**, whose consumer did clear normally; the main task callbacks temporarily disappear and object globals go 0, recovering with transition callbacks at ~97600ms. Thus that omission is associated with a state transition, NOT lost IRQ. IRQ0 producer ~60.052Hz, writer `09B0:08AF`; VGA scanout ~70.09Hz; 8145 frames, 3199 changed, 4946 repeated, 8145/8145 frame/scanmem hash matches, 56000/56000 line/cache matches. Transition 36.136–39.046s between alternate/main objects, no watched ADDs, IRQ pending counter reaches 10 and cleared once at 39040ms, not evidence of catch-up. Earlier private disassembly confirmed 32-bit ADD `0180:002315B1` [EBP+0x18]+=[EBP+0x10] and `0180:002315B7` [EBP+0x1C]+=[EBP+0x14], likely 16.16 fixed-point; 20016 full DWORD ADDs 0 EBX-delta mismatches, 20016 EBP object pointer matches. NEW CODE INSIGHT: `helper_candidate_0021374A` traverses object data to calculate MIN/MAX BOUNDS, **not movement integrator**. The same-run private callback code contains direct calls `0x230101 -> 0x23156C` and `0x22FB58 -> 0x23156C`; relation to 0x2315B1/B7 writer still needs indirect control-flow confirmation. NEXT: decode 0x23156C and/or inspect hit/input/animation routines, do NOT assert full combat-simulation tick from movement alone. No copyrighted game bytes in repo; no guest/PIT/VGA modifications.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
