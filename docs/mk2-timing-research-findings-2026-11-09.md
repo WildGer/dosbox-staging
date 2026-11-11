@@ -2386,8 +2386,122 @@ the entry is executed ~60Hz, check role/conditional
 branches and do not yet identify a universal
 combat-logic frame rate.
 
+## 2026-11-11 09:55: dynamic entry at 0180:0023156C
+
+**Evidence:** User pasted the stdout from
+`scripts/analyze_mk2_movement_entry.py` for
+`mk2_normal_40000_20261111_095520_movement_entry.csv`.
+The raw 09:55 CSV files were **not uploaded in this turn**;
+do not imply direct independent CSV analysis.
+
+### Actual entry/callsite evidence
+
+- **3,995 observed entries** at protected-mode
+  `0180:0023156C`, zero buffer overflow or drops.
+  Inter-entry interval median **16.651 ms**, min
+  **0.001 ms**, max **6,660.850 ms**. A median near
+  60Hz does NOT mean entry on every 60Hz tick.
+- The top-of-stack DWORD on entry is a real CALL
+  return address for two paths already validated
+  by disassembling the user's prior 32-bit
+  callback snippets:
+  - **0x22FB5D**, **3,614** entries (90.46%):
+    `0x22FB58: CALL 0x23156C` (confirmed).
+  - **0x230106**, **373** entries (9.34%):
+    `0x230101: CALL 0x23156C` (confirmed).
+  - **0x21C742**, **8** entries (0.20%):
+    *candidate* callsite 0x21C73D; not yet
+    disassembled/confirmed.
+- **EAX** is `0x2B8104` for **2,919** entries.
+  It varies considerably otherwise, including
+  various object/task-like pointers. The
+  function may receive an object pointer
+  in a different register or internally
+  load/change the processing context; needs
+  actual body disassembly.
+- **EBP at entry does NOT match either active
+  object pointer** for any of 3,995 entries:
+  3,293 have `EBP=0x275E2C`; 702 have
+  `EBP=0x2773D4`. In contrast, the
+  `ADD DWORD [EBP+0x18/0x1C]` writer
+  instructions previously had EBP equal to
+  the observed object pointer on all 20,016
+  recorded stores. Thus an EBP context
+  change occurs within or outside the path;
+  no proof yet that these calls reach both
+  movement ADDs.
+- At entry the sampled two global object
+  pointers are consistently
+  `A=0x2B8104, B=0x2B815C`
+  for the 3,995 entries.
+
+### Correlation with IRQ0 and actual ADDs
+
+- In same-run `_signal.csv`, there are
+  **5,546** IRQ0 producer writes at
+  `09B0:08AF`.
+- The 3,995 function entries map to
+  **3,528 distinct producer tick intervals**;
+  **463 ticks have multiple entries**.
+  Thus the 3,995 calls do not form a
+  perfect single-per-tick sequence.
+- Median lag from preceding IRQ0
+  **0.024 ms** (min 0.021, max 3.848).
+  This strongly associates the function
+  with IRQ0-paced scheduled work.
+- The same-run movement full-DWORD
+  `+0x18` ADD stream has **10,742**
+  observed entries (that count comprises
+  both objects, not 10,742 separate game
+  frames):
+  - B primary 0x2B815C: **5,125**;
+  - A primary 0x2B8104: **5,125**;
+  - B alternate 0x2B8AFC: **246**;
+  - A alternate 0x2B88EC: **246**.
+- **3,528 IRQ0 intervals** contain both an
+  entry at 0x23156C and at least one of
+  the monitored movement ADDs.
+  Their temporal coincidence per IRQ0
+  interval is not proof that every
+  0x23156C call directly invokes
+  both ADD instructions.
+
+**Interpretation:** The two confirmed
+callers 0x22FB58/0x230101 dynamically
+invoke 0x23156C during the principal
+object phase. The function runs as part
+of IRQ0-paced work but is neither
+one-call-per-IRQ nor proven to be the
+single top-level movement tick.
+Interpreting the role requires
+disassembling the **first 256 bytes
+starting at 0x23156C** (new
+`helper_candidate_0023156C`
+in this same run's `*_dispatch_code.csv`),
+particularly how EBP can transition from
+task context to an object pointer and
+whether control reaches 0x2315B1.
+
+The fork analyzer now additionally
+separates return-address groups and
+reports same-run IRQ0 intervals per
+caller/return and overlaps with actual
+movement ADDs. This analyzer update
+does **not** require recompilation or
+rerunning MK2 if the 09:55 raw CSVs
+already exist.
+
+**NEXT INPUT:** User should upload the
+existing 09:55 `*_dispatch_code.csv`,
+`*_movement_entry.csv`, `*_signal.csv`,
+and `*_object_steps.csv`. The code
+CSV is the minimum to disassemble
+0x23156C; raw timestamps permit
+proper caller-specific temporal analysis.
+No new exe/PIT/VGA modifications needed.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research on `WildGer/dosbox-staging` branch `mk2-timing-research`. Read the latest section **2026-11-10: next investigation — dynamic entry into 0x23156C, no clocks changed** and the raw 15-stream cross-clock results. Existing proof: IRQ0 producer `09B0:08AF` ~60.05Hz drives scheduler; VGA ~70.09Hz is hardware scanout NOT proof of 70FPS rendering; for both object phases actual full-DWORD movement ADDs at `0180:002315B1`/`002315B7` run mean ~60Hz, one per distinct IRQ0 tick per object; 20016 ADDs with 0 arithmetic mismatches; helper `0x21374A` calculates object bounds not movement. 32-bit callback snippets contain CALLs from `0x230101` and `0x22FB58` to `0x23156C`; actual role/connection to ADDs remains unproven. NEW UNTESTED REPO CHANGE: guarded normal-core entry probe at guest `0180:0023156C`, bridge through `pic.cpp` to `Mk2SignalProbe::OnMovementFunctionEntry()`, writes buffered **`*_movement_entry.csv`** with emulated timestamp, CPU registers, stack-top DWORD (return-address candidate only), current A/B object pointers; ninth helper code snapshot in `*_dispatch_code.csv` captures 256 bytes from `0x23156C`; new `scripts/analyze_mk2_movement_entry.py` analyzes entry times, stack candidates, and same-run `_signal` vs `_object_steps` correlation. NEXT: Windows build and same existing opt-in core=normal 40000 cycles launcher with `DOSBOX_MK2_SIGNAL_WATCH=1` and trace file; user supplies new `_movement_entry.csv` / `_dispatch_code.csv`, optionally same-run signal/steps. Unproven whether all combat subsystems tick at 60Hz; do not alter EXE, PIT or VGA. External references explain 320x200 VGA hardware ~70Hz and programmable PIT IRQ0, but MK2 developer rationale is inferred not documented.
+> User project MK2 DOS timing `WildGer/dosbox-staging` branch `mk2-timing-research`. READ most recent findings section **2026-11-11 09:55: dynamic entry at 0180:0023156C**, plus preceding 22:27 15-CSV cross-clock findings. Confirmed 16-bit real-mode PIT IRQ0 producer 09B0:08AF ~60.05Hz and protected-mode consumer 0180:2054AD, task scheduler at 0180:205531, VGA scanout ~70.09Hz independent; genuine two-axis position ADDs 0180:2315B1/2315B7 to 32-bit candidate 16.16 accumulators, typically once per IRQ0 tick per object, NOT proof all combat logic is 60Hz. User provided console output (not raw CSV) for 2026-11-11 09:55 run: 3995 actual entries at 0180:23156C, median 16.651ms, zero overflow, some tick intervals multiple entries, max inter-entry gap 6.66s. Entry top-of-stack return PC 0x22FB5D for 3614 calls (confirmed CALL at 0x22FB58 in prior private disassembly), 0x230106 for 373 calls (confirmed CALL at 0x230101), and 0x21C742 for 8 (candidate callsite 21C73D unconfirmed). EBP at entry 0x275E2C (3293 times) or 0x2773D4 (702 times), NEVER one of two tracked object pointers; but at actual position-writer ADDs EBP always equals object pointer. 5546 IRQ0 producer events, entries belong to 3528 distinct IRQ intervals, 463 of those contain multiple entries, lag median 0.024ms after IRQ0. Same-run 10742 full-DWORD ADDs to +0x18 across 4 object pointer groups (5125 each primary and 246 each alternate); 3528 IRQ intervals contain both entry and ADD. **Next: user upload same-run 09:55 `mk2_normal_40000_20261111_095520_dispatch_code.csv`** to disassemble `helper_candidate_0023156C`, plus raw `_movement_entry.csv`, `_signal.csv`, `_object_steps.csv` to correlate by caller. Github script `scripts/analyze_mk2_movement_entry.py` was extended to show return-address group interval/correlation; can rerun without rebuilding MK2. NO game bytes on GitHub and no timing/game binary modifications.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
