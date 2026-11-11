@@ -1201,6 +1201,71 @@ per-object motion or another state update.
 Do not equate field-change frequency or
 scheduler cadence with a proven combat tick.
 
+### Confirmed x86 position integration: record whole-DWORD ADD cadence
+
+The user-provided four 256-byte private MK2 code
+snapshots have been inspected and byte-aligned.
+The **actual guest writer instructions** are:
+
+- `0180:002315B1`: 32-bit addition to
+  `DWORD [EBP+0x18]` using increment
+  loaded from `DWORD [EBP+0x10]`
+- `0180:002315B7`: 32-bit addition to
+  `DWORD [EBP+0x1C]` using increment
+  loaded from `DWORD [EBP+0x14]`
+
+The prior watched WORD fields `+0x1A` and
+`+0x1E` are the **upper 16-bit halves**
+of these 32-bit accumulators. Accordingly
+the conditional median spacing of upper-word
+changes (~20.8–21.0ms) is NOT the rate
+at which the movement integrator runs.
+The data are strongly compatible with a
+**two-axis 16.16 fixed-point position**,
+but the exact fields' semantic names,
+units and object identity require validation.
+
+A new default-off companion output
+`*_object_steps.csv` records **every
+guest ADD DWORD store at these two known
+EIPs** to either dynamically watched object,
+including when the high WORD remains unchanged
+or the increment is zero. It records full
+DWORD before/after, EBX, expected modulo-
+2^32 delta, signed high words, EBP and PIC time.
+It runs under the *existing*
+`DOSBOX_MK2_TRACE` + `DOSBOX_MK2_SIGNAL_WATCH=1`
+conditions and leaves the game/timers unchanged.
+
+```powershell
+# Update and build the research branch, then run the
+# same successful core=normal, 40000-cycle MK2 launcher.
+# After closing DOSBox, from the repo root:
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_object_steps.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_object_steps.py "$($latest.FullName)"
+}
+```
+
+The analyzer groups observations by object pointer
+and 32-bit axis offset, reports per-group
+ADD-to-ADD spacing and distinguishes high-WORD
+changes from fraction-only and zero-increment
+stores. It verifies `(new_raw32 - old_raw32)
+mod 2^32 == EBX` for each recorded ADD.
+The code **has not yet been compiled or
+runtime-tested on Windows**.
+
+This can quantify the **movement-integration
+instruction rate** for these candidate
+objects. It is NOT in itself the full combat
+simulation tick unless corroborated with
+input, hit tests, animations and actual
+per-tick state transitions.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -1225,6 +1290,7 @@ scheduler cadence with a proven combat tick.
 - `scripts/analyze_mk2_object_trace.py`: analyze candidate object +0x1A/+0x1E field deltas sampled immediately before each timed-task dispatch.
 - `scripts/analyze_mk2_object_writes.py`: attribute observed candidate object field STORE instructions to guest CS:EIP using new `_object_writes.csv` (not merely temporal correlation).
 - `src/hardware/mk2_signal_probe.h`: one-time private 256-byte writer-aligned and preceding-context snapshots at `0x2315B1`/`0x2315B7` in `_object_writer_code.csv`.
+- `scripts/analyze_mk2_object_steps.py`: report every captured 32-bit ADD integration step and separate fractional-only versus integer-coordinate changes (`_object_steps.csv`).
 - `src/hardware/mk2_signal_probe.h`: add eight helper-candidate private snippets and candidate object fields to the same opt-in diagnostic streams.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
