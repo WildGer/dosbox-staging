@@ -252,6 +252,41 @@ def main() -> None:
             print(f"  ADD-containing IRQ0 intervals: "
                   f"{len(all_move_ticks):,}/{len(producer):,} "
                   f"({active_tick_baseline * 100:.2f}% of observed producer events)")
+            entry_ticks = set(ent_ticks) - {-1}
+            overlap_ticks = all_move_ticks & entry_ticks
+            movement_without_entry = all_move_ticks - entry_ticks
+            entry_without_movement = entry_ticks - all_move_ticks
+            print("  Cross-classified IRQ0 intervals:")
+            print(f"    Both helper entry and tracked ADD: "
+                  f"{len(overlap_ticks):,}")
+            print(f"    Tracked ADD but NO helper entry: "
+                  f"{len(movement_without_entry):,} "
+                  f"({len(movement_without_entry) / len(all_move_ticks) * 100:.2f}%"
+                  f" of ADD-containing intervals)")
+            print(f"    Helper entry but NO tracked ADD: "
+                  f"{len(entry_without_movement):,}")
+            print(f"    Neither: "
+                  f"{len(set(range(len(producer))) - all_move_ticks - entry_ticks):,}")
+            print("  Tracked object groups, with/without helper entry "
+                  "in the SAME IRQ0 interval:")
+            object_ticks = defaultdict(set)
+            for row in axis1:
+                tick = bisect_right(
+                    producer, float(row["emulated_ms"])
+                ) - 1
+                if tick >= 0:
+                    object_ticks[(row["object"], int(row["object_pointer"]))].add(tick)
+            for (obj, ptr), ticks in sorted(object_ticks.items(),
+                                             key=lambda item: -len(item[1])):
+                with_entry = len(ticks & entry_ticks)
+                without_entry = len(ticks - entry_ticks)
+                print(f"    {obj} ptr=0x{ptr:08X}: "
+                      f"{len(ticks):,} ADD intervals; "
+                      f"{with_entry:,} with helper entry, "
+                      f"{without_entry:,} without")
+            print("  Caution: the 'no entry' classification applies to "
+                  "the same IRQ0 interval only; a function may be reached "
+                  "through alternate call paths or at other times.")
             for pc, group in sorted(entries_by_return.items(),
                                     key=lambda it: -len(it[1]))[:args.top]:
                 later = []
