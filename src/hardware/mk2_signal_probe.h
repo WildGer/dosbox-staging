@@ -428,6 +428,51 @@ public:
         CaptureHelperCandidateCode(row.handler_eip, row.emulated_ms);
     }
 
+    // Entry of a candidate shared movement routine. This is observed at
+    // the real 32-bit instruction boundary (not inferred from a static
+    // CALL target). Capture its timing, register arguments and stack top.
+    // The stack DWORD is a RETURN-ADDRESS CANDIDATE only: a JMP into this
+    // address need not leave an actual return address there.
+    void OnMovementFunctionEntry()
+    {
+        if (!enabled || !IsNormalCore() || !cpu.pmode ||
+            !cpu.code.big || SegValue(cs) != 0x0180u ||
+            SegPhys(cs) != 0u || reg_eip != 0x0023156cu ||
+            !InWindow(PIC_FullIndex()) || !movement_entry_output.is_open()) {
+            return;
+        }
+        if (movement_entry_count == MovementEntryBufferSize) {
+            ++movement_entry_dropped;
+            return;
+        }
+        auto& entry = movement_entry_buffer[movement_entry_count++];
+        entry.emulated_ms = PIC_FullIndex();
+        entry.eax = reg_eax;
+        entry.ebx = reg_ebx;
+        entry.ecx = reg_ecx;
+        entry.edx = reg_edx;
+        entry.esi = reg_esi;
+        entry.edi = reg_edi;
+        entry.ebp = reg_ebp;
+        entry.esp = reg_esp;
+        entry.ds = SegValue(ds);
+        entry.ds_base = SegPhys(ds);
+        entry.ss = SegValue(ss);
+        entry.ss_base = SegPhys(ss);
+        const uint64_t stack_top = static_cast<uint64_t>(entry.ss_base) +
+                                   static_cast<uint64_t>(entry.esp);
+        entry.stack_dword = stack_top <=
+                           static_cast<uint64_t>(
+                                   std::numeric_limits<PhysPt>::max()) - 4u
+                                   ? mem_readd<MemOpMode::SkipBreakpoints>(
+                                             static_cast<PhysPt>(stack_top))
+                                   : 0u;
+        const auto a = ReadObjectFields(entry.ds_base, 0x002b5fc2u);
+        const auto b = ReadObjectFields(entry.ds_base, 0x002b6146u);
+        entry.object_a_ptr = a.valid ? a.pointer : 0u;
+        entry.object_b_ptr = b.valid ? b.pointer : 0u;
+    }
+
     void OnClockTick(const uint32_t ms)
     {
         if (enabled && ms % 1000u == 0) {
@@ -435,6 +480,7 @@ public:
             FlushCode();
             FlushDispatch();
             FlushDispatchCode();
+            FlushMovementEntry();
             if (object_write_output.is_open()) {
                 object_write_output.flush();
             }
@@ -456,11 +502,31 @@ private:
     static constexpr std::size_t DispatchBufferSize = 4096;
     static constexpr std::size_t DispatchCodeBytes = 256;
     static constexpr std::size_t DispatchCodeSites = 14;
-    static constexpr std::size_t HelperCodeSites = 8;
+    static constexpr std::size_t HelperCodeSites = 9;
+    static constexpr std::size_t MovementEntryBufferSize = 4096;
     static constexpr std::size_t ObjectWatchSites = 4;
     static constexpr std::size_t ObjectWriterCodeSites = 4;
     static constexpr std::size_t ObjectWriterCodeBytes = 256;
     static constexpr uint32_t ObjectWriterContextBytes = 48;
+
+    struct MovementEntryRow {
+        double emulated_ms = 0;
+        uint32_t eax = 0;
+        uint32_t ebx = 0;
+        uint32_t ecx = 0;
+        uint32_t edx = 0;
+        uint32_t esi = 0;
+        uint32_t edi = 0;
+        uint32_t ebp = 0;
+        uint32_t esp = 0;
+        uint32_t ds_base = 0;
+        uint32_t ss_base = 0;
+        uint32_t stack_dword = 0;
+        uint32_t object_a_ptr = 0;
+        uint32_t object_b_ptr = 0;
+        uint16_t ds = 0;
+        uint16_t ss = 0;
+    };
 
     struct ObjectWriterSnapshot {
         bool captured = false;
@@ -702,6 +768,22 @@ private:
                     "writer_cs,writer_ds\n";
         }
 
+        const auto movement_path = trace.substr(0, cut) +
+                                   "_movement_entry" +
+                                   (cut < trace.size()
+                                            ? trace.substr(cut)
+                                            : ".csv");
+        movement_entry_output.open(movement_path,
+                                   std::ios::out | std::ios::trunc);
+        if (movement_entry_output.is_open()) {
+            movement_entry_output <<
+                "event_index,emulated_ms,entry_eip,entry_eax,"
+                "entry_ebx,entry_ecx,entry_edx,entry_esi,"
+                "entry_edi,entry_ebp,entry_esp,ds,ds_base,"
+                "ss,ss_base,stack_dword,object_a_pointer,"
+                "object_b_pointer,dropped_count\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -714,6 +796,7 @@ private:
         FlushCode();
         FlushDispatch();
         FlushDispatchCode();
+        FlushMovementEntry();
         if (object_write_output.is_open()) {
             object_write_output.flush();
         }
@@ -840,7 +923,8 @@ private:
         }
         static constexpr std::array<uint32_t, HelperCodeSites> targets = {
                 0x0021374au, 0x002136f6u, 0x00202706u, 0x00201739u,
-                0x00203285u, 0x00231ec8u, 0x002054bbu, 0x00205673u};
+                0x00203285u, 0x00231ec8u, 0x002054bbu, 0x00205673u,
+                0x0023156cu};
         for (std::size_t i = 0; i < targets.size(); ++i) {
             auto& sample = helper_code[i];
             if (sample.captured) {
@@ -1058,6 +1142,40 @@ private:
         object_writer_code_output.flush();
     }
 
+    void FlushMovementEntry()
+    {
+        if (!movement_entry_output.is_open()) {
+            return;
+        }
+        for (std::size_t i = 0; i < movement_entry_count; ++i) {
+            const auto& e = movement_entry_buffer[i];
+            movement_entry_output << ++movement_entry_written << ','
+                                  << std::fixed << std::setprecision(6)
+                                  << e.emulated_ms
+                                  << ',' << 0x0023156cu << ','
+                                  << e.eax << ',' << e.ebx << ','
+                                  << e.ecx << ',' << e.edx << ','
+                                  << e.esi << ',' << e.edi << ','
+                                  << e.ebp << ',' << e.esp << ','
+                                  << e.ds << ',' << e.ds_base << ','
+                                  << e.ss << ',' << e.ss_base << ','
+                                  << e.stack_dword << ','
+                                  << e.object_a_ptr << ','
+                                  << e.object_b_ptr << ",0\n";
+        }
+        if (movement_entry_dropped) {
+            movement_entry_output << ++movement_entry_written << ','
+                                  << std::fixed << std::setprecision(6)
+                                  << PIC_FullIndex()
+                                  << ",0,0,0,0,0,0,0,0,0,0,0,0,0,"
+                                  << "0,0,0,0," << movement_entry_dropped
+                                  << '\n';
+            movement_entry_dropped = 0;
+        }
+        movement_entry_count = 0;
+        movement_entry_output.flush();
+    }
+
     void FlushDispatch()
     {
         if (!dispatch_output.is_open()) {
@@ -1233,6 +1351,7 @@ private:
     std::ofstream object_write_output = {};
     std::ofstream object_writer_code_output = {};
     std::ofstream object_steps_output = {};
+    std::ofstream movement_entry_output = {};
     std::array<Entry, BufferCount> buffer = {};
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
     std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
@@ -1241,8 +1360,12 @@ private:
     std::array<ObjectWatch, ObjectWatchSites> object_watches = {};
     std::array<ObjectPending, ObjectWatchSites> object_pending = {};
     std::array<ObjectWriterSnapshot, ObjectWriterCodeSites> object_writer_code = {};
+    std::array<MovementEntryRow, MovementEntryBufferSize> movement_entry_buffer = {};
     uint64_t object_write_count = 0;
     uint64_t object_step_count = 0;
+    uint64_t movement_entry_written = 0;
+    uint64_t movement_entry_dropped = 0;
+    std::size_t movement_entry_count = 0;
     std::size_t dispatch_count = 0;
     uint64_t dispatch_written = 0;
     uint64_t dispatch_dropped = 0;
