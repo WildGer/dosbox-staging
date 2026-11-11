@@ -183,6 +183,9 @@ public:
             entry.active = false;
             const auto after = mem_readw<MemOpMode::SkipBreakpoints>(
                     copy.watch.field_linear);
+            if (after != copy.before) {
+                CaptureDominantObjectWriterCode(copy);
+            }
             if (after != copy.before && object_write_output.is_open()) {
                 object_write_output << ++object_write_count << ','
                                     << std::fixed << std::setprecision(6)
@@ -371,6 +374,7 @@ public:
             if (object_write_output.is_open()) {
                 object_write_output.flush();
             }
+            FlushObjectWriterCode();
         }
     }
 
@@ -387,6 +391,20 @@ private:
     static constexpr std::size_t DispatchCodeSites = 14;
     static constexpr std::size_t HelperCodeSites = 8;
     static constexpr std::size_t ObjectWatchSites = 4;
+    static constexpr std::size_t ObjectWriterCodeSites = 2;
+    static constexpr std::size_t ObjectWriterCodeBytes = 256;
+    static constexpr uint32_t ObjectWriterContextBytes = 48;
+
+    struct ObjectWriterSnapshot {
+        bool captured = false;
+        bool written = false;
+        double emulated_ms = 0;
+        uint16_t cs = 0;
+        uint32_t cs_base = 0;
+        uint32_t observed_eip = 0;
+        uint32_t start_eip = 0;
+        std::array<uint8_t, ObjectWriterCodeBytes> bytes = {};
+    };
 
     struct ObjectWatch {
         bool valid = false;
@@ -585,6 +603,17 @@ private:
                                    "protected_mode\n";
         }
 
+        const auto object_writer_code_path =
+                trace.substr(0, cut) + "_object_writer_code" +
+                (cut < trace.size() ? trace.substr(cut) : ".csv");
+        object_writer_code_output.open(object_writer_code_path,
+                                       std::ios::out | std::ios::trunc);
+        if (object_writer_code_output.is_open()) {
+            object_writer_code_output <<
+                    "site,emulated_ms,cs,cs_base,observed_eip,"
+                    "snapshot_start,bytes_hex,code_bits\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -600,6 +629,7 @@ private:
         if (object_write_output.is_open()) {
             object_write_output.flush();
         }
+        FlushObjectWriterCode();
     }
 
     // The source at 09B0:08AF has now been observed through both
@@ -850,6 +880,79 @@ private:
         return result;
     }
 
+    // Two hot instruction sites account for 4,889 of the 4,958
+    // changed field stores in the 21:xx research run. Capture only
+    // one tiny, read-only code slice around each of those sites.
+    // The 48-byte preceding context MAY start mid-instruction;
+    // re-align from known EIP when interpreting the disassembly.
+    void CaptureDominantObjectWriterCode(const ObjectPending& change)
+    {
+        if (!object_writer_code_output.is_open() ||
+            !change.protected_mode || change.cs != 0x0180u ||
+            change.cs_base != 0) {
+            return;
+        }
+        static constexpr std::array<uint32_t, ObjectWriterCodeSites> sites = {
+                0x002315b1u, 0x002315b7u};
+        for (std::size_t i = 0; i < sites.size(); ++i) {
+            auto& snapshot = object_writer_code[i];
+            if (snapshot.captured || change.eip != sites[i]) {
+                continue;
+            }
+            if (change.eip < ObjectWriterContextBytes ||
+                static_cast<uint64_t>(change.eip) +
+                        ObjectWriterCodeBytes >
+                        std::numeric_limits<PhysPt>::max()) {
+                return;
+            }
+            snapshot.cs = change.cs;
+            snapshot.cs_base = change.cs_base;
+            snapshot.observed_eip = change.eip;
+            snapshot.start_eip = change.eip - ObjectWriterContextBytes;
+            snapshot.emulated_ms = change.emulated_ms;
+            for (std::size_t b = 0; b < ObjectWriterCodeBytes; ++b) {
+                const auto linear = static_cast<PhysPt>(
+                        change.cs_base + snapshot.start_eip + b);
+                snapshot.bytes[b] =
+                        mem_readb<MemOpMode::SkipBreakpoints>(linear);
+            }
+            snapshot.captured = true;
+            return;
+        }
+    }
+
+    void FlushObjectWriterCode()
+    {
+        if (!object_writer_code_output.is_open()) {
+            return;
+        }
+        for (auto& snapshot : object_writer_code) {
+            if (!snapshot.captured || snapshot.written) {
+                continue;
+            }
+            object_writer_code_output << "writer_context_" << std::hex
+                                      << std::uppercase << std::setfill('0')
+                                      << std::setw(8) << snapshot.observed_eip
+                                      << std::dec << std::nouppercase
+                                      << std::setfill(' ') << ','
+                                      << std::fixed << std::setprecision(6)
+                                      << snapshot.emulated_ms << ','
+                                      << snapshot.cs << ','
+                                      << snapshot.cs_base << ','
+                                      << snapshot.observed_eip << ','
+                                      << snapshot.start_eip << ','
+                                      << std::hex << std::setfill('0');
+            for (const auto byte : snapshot.bytes) {
+                object_writer_code_output << std::setw(2)
+                                          << static_cast<unsigned>(byte);
+            }
+            object_writer_code_output << std::dec << std::setfill(' ')
+                                      << ",32\n";
+            snapshot.written = true;
+        }
+        object_writer_code_output.flush();
+    }
+
     void FlushDispatch()
     {
         if (!dispatch_output.is_open()) {
@@ -1023,6 +1126,7 @@ private:
     std::ofstream dispatch_output = {};
     std::ofstream dispatch_code_output = {};
     std::ofstream object_write_output = {};
+    std::ofstream object_writer_code_output = {};
     std::array<Entry, BufferCount> buffer = {};
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
     std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
@@ -1030,6 +1134,7 @@ private:
     std::array<DispatchCodeSnapshot, HelperCodeSites> helper_code = {};
     std::array<ObjectWatch, ObjectWatchSites> object_watches = {};
     std::array<ObjectPending, ObjectWatchSites> object_pending = {};
+    std::array<ObjectWriterSnapshot, ObjectWriterCodeSites> object_writer_code = {};
     uint64_t object_write_count = 0;
     std::size_t dispatch_count = 0;
     uint64_t dispatch_written = 0;
