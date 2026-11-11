@@ -142,7 +142,8 @@ public:
             pending.ds = writer_ds;
             pending.ds_base = writer_ds_base;
         }
-        if (touches_object && object_write_output.is_open()) {
+        if (touches_object &&
+            (object_write_output.is_open() || object_steps_output.is_open())) {
             for (std::size_t i = 0; i < object_watches.size(); ++i) {
                 const auto& watch = object_watches[i];
                 if (!watch.valid ||
