@@ -110,23 +110,61 @@ public:
         // PIC_FullIndex() for the millions of unrelated guest writes.
         const bool touches_target = Overlaps(address, size, target_linear);
         const bool touches_pointer = Overlaps(address, size, pointer_location);
-        if ((!touches_target && !touches_pointer) ||
+        bool touches_object = false;
+        for (const auto& watch : object_watches) {
+            if (watch.valid && Overlaps(address, size, watch.field_linear)) {
+                touches_object = true;
+                break;
+            }
+        }
+        if ((!touches_target && !touches_pointer && !touches_object) ||
             !InWindow(PIC_FullIndex())) {
             return false;
         }
 
-        pending.active = true;
-        pending.pointer_write = touches_pointer;
-        pending.addr = address;
-        pending.size = size;
-        pending.before = mem_readd<MemOpMode::SkipBreakpoints>(
-                touches_pointer ? pointer_location : target_linear);
-        pending.emulated_ms = PIC_FullIndex();
-        pending.cs = SegValue(cs);
-        pending.cs_base = SegPhys(cs);
-        pending.eip = reg_eip; // interpreter's instruction-start EIP
-        pending.ds = SegValue(ds);
-        pending.ds_base = SegPhys(ds);
+        const auto at_ms = PIC_FullIndex();
+        const auto writer_cs = SegValue(cs);
+        const auto writer_cs_base = SegPhys(cs);
+        const auto writer_eip = reg_eip;
+        const auto writer_ds = SegValue(ds);
+        const auto writer_ds_base = SegPhys(ds);
+        if (touches_target || touches_pointer) {
+            pending.active = true;
+            pending.pointer_write = touches_pointer;
+            pending.addr = address;
+            pending.size = size;
+            pending.before = mem_readd<MemOpMode::SkipBreakpoints>(
+                    touches_pointer ? pointer_location : target_linear);
+            pending.emulated_ms = at_ms;
+            pending.cs = writer_cs;
+            pending.cs_base = writer_cs_base;
+            pending.eip = writer_eip;
+            pending.ds = writer_ds;
+            pending.ds_base = writer_ds_base;
+        }
+        if (touches_object && object_write_output.is_open()) {
+            for (std::size_t i = 0; i < object_watches.size(); ++i) {
+                const auto& watch = object_watches[i];
+                if (!watch.valid ||
+                    !Overlaps(address, size, watch.field_linear)) {
+                    continue;
+                }
+                auto& entry = object_pending[i];
+                entry.active = true;
+                entry.watch = watch;
+                entry.before = mem_readw<MemOpMode::SkipBreakpoints>(
+                        watch.field_linear);
+                entry.emulated_ms = at_ms;
+                entry.store_linear = address;
+                entry.store_size = size;
+                entry.cs = writer_cs;
+                entry.cs_base = writer_cs_base;
+                entry.eip = writer_eip;
+                entry.ds = writer_ds;
+                entry.ds_base = writer_ds_base;
+                entry.protected_mode = cpu.pmode;
+            }
+        }
         return true;
     }
 
@@ -134,6 +172,38 @@ public:
     // instead of assuming a byte/word/quad write had the expected effect.
     void AfterGuestStore()
     {
+        // Observe *actual stores* to candidate object fields, rather than
+        // inferring the writer from an earlier scheduler callback. Each
+        // entry is made BEFORE the store and compared AFTER the store.
+        for (auto& entry : object_pending) {
+            if (!entry.active) {
+                continue;
+            }
+            const auto copy = entry;
+            entry.active = false;
+            const auto after = mem_readw<MemOpMode::SkipBreakpoints>(
+                    copy.watch.field_linear);
+            if (after != copy.before && object_write_output.is_open()) {
+                object_write_output << ++object_write_count << ','
+                                    << std::fixed << std::setprecision(6)
+                                    << copy.emulated_ms << ','
+                                    << (copy.watch.slot < 2 ? 'A' : 'B')
+                                    << ',' << copy.watch.field_offset
+                                    << ',' << copy.watch.object_pointer
+                                    << ',' << copy.watch.object_linear
+                                    << ',' << copy.watch.field_linear
+                                    << ',' << copy.store_linear
+                                    << ',' << static_cast<unsigned>(
+                                               copy.store_size)
+                                    << ',' << static_cast<int16_t>(copy.before)
+                                    << ',' << static_cast<int16_t>(after)
+                                    << ',' << copy.cs << ',' << copy.cs_base
+                                    << ',' << copy.eip << ',' << copy.ds
+                                    << ',' << copy.ds_base << ','
+                                    << static_cast<unsigned>(
+                                               copy.protected_mode) << '\n';
+            }
+        }
         if (!pending.active) {
             return;
         }
@@ -285,6 +355,8 @@ public:
         // 60-Hz scheduler and 70-Hz VGA refresh.
         row.object_a = ReadObjectFields(row.ds_base, 0x002b5fc2u);
         row.object_b = ReadObjectFields(row.ds_base, 0x002b6146u);
+        RefreshObjectWatches(row.object_a, 0, row.ds_base);
+        RefreshObjectWatches(row.object_b, 2, row.ds_base);
         CaptureDispatchCallbackCode(row.handler_eip, row.emulated_ms);
         CaptureHelperCandidateCode(row.handler_eip, row.emulated_ms);
     }
@@ -296,6 +368,9 @@ public:
             FlushCode();
             FlushDispatch();
             FlushDispatchCode();
+            if (object_write_output.is_open()) {
+                object_write_output.flush();
+            }
         }
     }
 
@@ -311,6 +386,31 @@ private:
     static constexpr std::size_t DispatchCodeBytes = 256;
     static constexpr std::size_t DispatchCodeSites = 14;
     static constexpr std::size_t HelperCodeSites = 8;
+    static constexpr std::size_t ObjectWatchSites = 4;
+
+    struct ObjectWatch {
+        bool valid = false;
+        uint8_t slot = 0;
+        uint16_t field_offset = 0;
+        uint32_t object_pointer = 0;
+        uint32_t object_linear = 0;
+        PhysPt field_linear = 0;
+    };
+
+    struct ObjectPending {
+        bool active = false;
+        ObjectWatch watch = {};
+        uint16_t before = 0;
+        double emulated_ms = 0;
+        PhysPt store_linear = 0;
+        uint8_t store_size = 0;
+        uint16_t cs = 0;
+        uint32_t cs_base = 0;
+        uint32_t eip = 0;
+        uint16_t ds = 0;
+        uint32_t ds_base = 0;
+        bool protected_mode = false;
+    };
 
     struct DispatchCodeSnapshot {
         bool captured = false;
@@ -465,6 +565,26 @@ private:
                                     "bytes_hex,code_bits\n";
         }
 
+        // Store-level attribution of the two observed object fields:
+        // DS:[DS:[global-pointer]+0x1A/0x1E] for each object.
+        // This is separate from the pre-dispatch change snapshots.
+        const auto object_write_path = trace.substr(0, cut) +
+                                       "_object_writes" +
+                                       (cut < trace.size()
+                                                ? trace.substr(cut)
+                                                : ".csv");
+        object_write_output.open(object_write_path,
+                                 std::ios::out | std::ios::trunc);
+        if (object_write_output.is_open()) {
+            object_write_output << "event_index,emulated_ms,object,"
+                                   "field_offset,object_pointer,"
+                                   "object_linear,field_linear,"
+                                   "store_linear,store_size,before,after,"
+                                   "writer_cs,writer_cs_base,writer_eip,"
+                                   "writer_ds,writer_ds_base,"
+                                   "protected_mode\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -477,6 +597,9 @@ private:
         FlushCode();
         FlushDispatch();
         FlushDispatchCode();
+        if (object_write_output.is_open()) {
+            object_write_output.flush();
+        }
     }
 
     // The source at 09B0:08AF has now been observed through both
@@ -664,6 +787,33 @@ private:
             sample.written = true;
         }
         dispatch_code_output.flush();
+    }
+
+    void RefreshObjectWatches(const ObjectFields& object,
+                              const std::size_t first_slot,
+                              const uint32_t ds_base)
+    {
+        for (std::size_t j = 0; j < 2; ++j) {
+            auto& watch = object_watches[first_slot + j];
+            watch.valid = false;
+            if (!object.valid) {
+                continue;
+            }
+            const uint16_t offset = (j == 0) ? 0x1au : 0x1eu;
+            const uint64_t linear =
+                    static_cast<uint64_t>(ds_base) +
+                    static_cast<uint64_t>(object.pointer);
+            if (linear > std::numeric_limits<PhysPt>::max() -
+                                 static_cast<uint64_t>(offset) - 2u) {
+                continue;
+            }
+            watch.slot = static_cast<uint8_t>(first_slot + j);
+            watch.field_offset = offset;
+            watch.object_pointer = object.pointer;
+            watch.object_linear = static_cast<uint32_t>(linear);
+            watch.field_linear = static_cast<PhysPt>(linear + offset);
+            watch.valid = true;
+        }
     }
 
     static ObjectFields ReadObjectFields(const uint32_t ds_base,
@@ -872,11 +1022,15 @@ private:
     std::ofstream code_output = {};
     std::ofstream dispatch_output = {};
     std::ofstream dispatch_code_output = {};
+    std::ofstream object_write_output = {};
     std::array<Entry, BufferCount> buffer = {};
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
     std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
     std::array<DispatchCodeSnapshot, DispatchCodeSites> dispatch_code = {};
     std::array<DispatchCodeSnapshot, HelperCodeSites> helper_code = {};
+    std::array<ObjectWatch, ObjectWatchSites> object_watches = {};
+    std::array<ObjectPending, ObjectWatchSites> object_pending = {};
+    uint64_t object_write_count = 0;
     std::size_t dispatch_count = 0;
     uint64_t dispatch_written = 0;
     uint64_t dispatch_dropped = 0;
