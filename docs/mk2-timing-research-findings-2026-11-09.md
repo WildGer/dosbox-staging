@@ -1895,8 +1895,141 @@ their caller back to the scheduler's per-object
 callback (especially `0x21374A`) before
 identifying any real combat simulation tick.
 
+## Confirmed object position accumulator writes from 4 private snippets (2026-11-10)
+
+**Source:** user uploaded four **256-byte private guest-memory .bin**
+snippets named `writer_at_002315B1_002315B1.bin`,
+`writer_at_002315B7_002315B7.bin`,
+`writer_preceding_002315B1_00231581.bin`,
+and `writer_preceding_002315B7_00231587.bin`.
+These have been **actually read and disassembled** with
+32-bit x86 GNU objdump. All overlapping bytes matched
+exactly: the two writer-aligned snippets shifted six
+bytes, the two preceding snippets shifted six bytes,
+and each preceding snapshot matched its aligned
+snapshot after the 48-byte offset. No source code,
+original bytes, or disassembly binaries were
+committed to GitHub.
+
+### Crucial instruction-level result
+
+After a conditional movement gate, the actual writer
+`0180:002315B1` performs **ADD DWORD PTR [EBP+0x18],EBX**,
+immediately after loading EBX from **DWORD [EBP+0x10]**.
+Writer `0180:002315B7` performs
+**ADD DWORD PTR [EBP+0x1C],EBX**, immediately after
+loading EBX from **DWORD [EBP+0x14]**.
+
+The prior watch covered **WORD +0x1A** and
+**WORD +0x1E**, exactly the **HIGH 16 bits**
+of the two modified DWORDs at +0x18 and +0x1C.
+Thus the observed ~20.8–21.0-ms conditional
+changes in these WORDs were **not measurements
+of every ADD execution**: the lower half
+can change while the upper half remains
+unchanged.
+
+Strong inference: the object fields are
+**two accumulating coordinates or state axes**
+and +0x10/+0x14 are corresponding per-step
+increments, likely a **16.16 fixed-point
+position and velocity representation**.
+The exact spatial units, true fighter/player
+identities, and signed fixed-point semantics
+still require empirical validation.
+
+The control flow preceding the sums includes:
+- global `DWORD DS:[0x2B5A88]` test:
+  when nonzero it **jumps over both ADDs**
+  to `0x2315BA`;
+- when zero it loads +0x10, adds it to
+  +0x18, then loads +0x14 and adds it
+  to +0x1C;
+- after the sums, conditionally tests
+  global flags `DWORD DS:[0x2962D4]`,
+  branches based on `DWORD [EBP+0x34]`,
+  and computes position/bounds-like
+  values involving global offsets
+  `0x2B5A68/6A`, `0x2B5A80/82` and
+  `0x2B7498`.
+
+This strongly supports a *movement integration
+and subsequent bounds/collision-related
+processing* code region, rather than
+a mere rendering or input bitfield writer.
+But it does not yet confirm **which callback
+calls this routine**, that it executes once
+per PIT tick, or that **all combat systems**
+share the same clock. The code bytes at
+`0x23158F` began near padding or the
+previous routine; avoid disassembling the
+preceding-context binary's first byte as if
+it were necessarily an instruction boundary.
+Aligned snapshots at 0x2315B1/0x2315B7
+and the control flow at 0x231590 are
+reliable.
+
+### NEW next experiment: full DWORD motion integration cadence
+
+The existing `*_object_writes.csv` only logs
+changes of the **upper WORD**.
+The fork now adds opt-in
+`*_object_steps.csv` to capture
+**every observed actual 32-bit ADD** at
+`0180:002315B1` or `0180:002315B7`
+when its destination matches one of the
+two currently tracked object pointers.
+Log includes:
+- PIC emulated timestamp, object A/B, pointer,
+  offset `+0x18` or `+0x1C`;
+- complete **before/after unsigned DWORD**;
+- expected EBX increment and actual modulo-2^32
+  delta; `delta_matches` invariant;
+- old/new signed high WORD, `integer_changed`;
+- writer EBP, EBX, CS and DS.
+
+Events are recorded **even when the upper WORD
+does not change**, including zero increments.
+This is the appropriate stream for measuring
+these *integration instruction frequencies*,
+rather than attempting to infer ticks from
+integer coordinate changes. Analysis script
+`scripts/analyze_mk2_object_steps.py`
+groups object+pointer+axis, reports true
+ADD-to-ADD spacings, counts fractional-only
+updates and stationary updates, and verifies
+`(new-old) mod 2^32 == EBX`.
+
+**Status:** committed, but **NOT yet compiled
+or runtime-tested on the user's Windows system**.
+No game bytes, executable patches, timer
+changes, or altered guest state in the repo.
+Keep the previous `core=normal`,
+`cpu_cycles_protected=40000`,
+`DOSBOX_MK2_TRACE=<unique file>` and
+`DOSBOX_MK2_SIGNAL_WATCH=1` run.
+After closing MK2:
+
+```powershell
+$latest = Get-ChildItem "$env:USERPROFILE\Documents\MK2Timing" -Filter "*_object_steps.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_object_steps.py "$($latest.FullName)"
+}
+```
+
+This test can establish how often **this
+object-motion integration code** executes in
+active gameplay, not by itself the full
+combat-simulation tick (input, hit detection
+and animation may differ). To verify
+the caller chain, the previously captured
+`*_dispatch_code.csv` helper snapshot for
+`0x21374A` may be useful.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research `WildGer/dosbox-staging` on `mk2-timing-research`. Read newest findings section **Next object-store result: 4,958 changed writes, two dominant PCs (2026-11-10)** and prior sections/guide. Confirmed IRQ0 vector `09B0:0000`, timer producer `09B0:08AF` incrementing pending DWORD around 60.05Hz and protected consumer `0180:2054AD` clearing; scheduler `0180:205531` executes many timer-task callbacks, principal callback `0x2133B5` runs ~60Hz and calls `0x21374A` per object. User pasted latest `scripts/analyze_mk2_object_writes.py` stdout: **4,958 actual changed stores**, all protected mode, 2 dominant writer EIPs **0180:002315B1** (2,514 writes to object A/B field +0x1A) and **0180:002315B7** (2,375 writes to object A/B field +0x1E). These two writer instructions only 6 bytes apart cause **4,889 / 4,958 = 98.61%** of observed field changes. Per-field median conditional value-change intervals ~20.8–21.0ms, not proof of 48Hz or any simulation tick. Other 69 changed writes across 11 EIPs. Field meanings (position vs other) and caller chain are NOT yet proven. NEW UNTESTED code patch in `src/hardware/mk2_signal_probe.h`: on first actual changed store at 0x2315B1/0x2315B7, emit 4 tiny 256-byte private code slices (2 writer-aligned; 2 with 48 prior bytes) into `*_object_writer_code.csv` in same existing normal-core 40k signal-watch trace. Next: Windows compile+run, upload `*_object_writer_code.csv` plus optional raw `*_object_writes.csv`; disassemble actual writer instructions and trace toward per-object update callback 0x21374A. Do not commit game bytes, alter executable, PIT/VGA timing, or assert combat simulation frequency without real state-update evidence.
+> MK2 DOS timing research `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read latest findings **Confirmed object position accumulator writes from 4 private snippets (2026-11-10)**. User uploaded four 256-byte private .bin snapshots at guest 0x2315B1/0x2315B7 and 48 preceding bytes; all overlaps verified exactly with Python and objdump. Critical decoded code: `mov ebx,[ebp+10]`; `ADD DWORD [ebp+18],ebx` at **0180:002315B1**; `mov ebx,[ebp+14]`; `ADD DWORD [ebp+1C],ebx` at **0180:002315B7**. Both are gated by `DS:[0x2B5A88]` and followed by flags/position-bound tests. Prior watchers of WORD [+1A] and [+1E] were observing **only the upper 16 bits** of these two 32-bit accumulators, so ~20.8-21.0ms changes do NOT mean 48Hz update loop; likely 16.16 fixed-point two-axis coordinates/increments, though units and object identity not proven. User's prior actual guest write summary: 4958 changed high-WORD stores, 4889 (98.61%) by those two ADD PCs, all protected mode. Timer producer IRQ0 09B0:08AF ~60.05Hz, VGA ~70.09Hz, scheduler 0180:205531 with primary callback 0x2133B5 ~60Hz, helper 0x21374A calls once per candidate object. **NEW UNTESTED PATCH** in src/hardware/mk2_signal_probe.h adds `*_object_steps.csv`: log each observed full 32-bit store at writer EIP 2315B1/2315B7 to watched objects (including fractional-only/high-WORD unchanged and EBX=0), with before/after DWORD, EBX, expected delta, integer-changed flag and EBP. `scripts/analyze_mk2_object_steps.py` groups per object-pointer-axis and measures actual integration-store cadence, checks mod2^32 delta equals EBX. NEXT: update+build branch on Windows, run core=normal, 40000 protected cycles, `DOSBOX_MK2_SIGNAL_WATCH=1` and `DOSBOX_MK2_TRACE=<unique csv>`; analyze/upload `_object_steps.csv` and optionally 0x21374A helper snapshot; direct movie/game state evidence needed before asserting full combat simulation rate. No game code bytes/assets in GitHub, no PIT/VGA/guest modifications.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
