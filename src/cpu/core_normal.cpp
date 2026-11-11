@@ -148,8 +148,14 @@ Bits CPU_Core_Normal_Run() noexcept
 		// read the task node only at the independently decoded indirect
 		// near jump within MK2's protected-mode delayed-work dispatcher.
 		if (Mk2SignalWatchActive && cpu.pmode &&
-		    SegValue(cs) == 0x0180u && reg_eip == 0x00205531u) {
-			Mk2SignalOnTaskDispatch();
+		    SegValue(cs) == 0x0180u) {
+			if (reg_eip == 0x00205531u) {
+				Mk2SignalOnTaskDispatch();
+			} else if (reg_eip == 0x0023156cu) {
+				// Dynamic entry into a candidate shared movement helper.
+				// No guest CPU state or timing is modified here.
+				Mk2SignalOnMovementFunctionEntry();
+			}
 		}
 		LOADIP;
 		core.opcode_index=cpu.code.big*0x200;
