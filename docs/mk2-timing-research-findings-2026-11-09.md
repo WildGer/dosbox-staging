@@ -1702,8 +1702,109 @@ watchpoint may still be needed. No PIT,
 IRQ, VGA or executable modification is
 part of this experiment.
 
+## 2026-11-10 21:01: candidate object field-change cadence and writer probe
+
+**Evidence:** The user pasted the complete output of
+`python scripts/analyze_mk2_object_trace.py` for
+`mk2_normal_40000_20261110_210131_dispatch.csv`.
+The raw CSV has **not** been uploaded in the present turn, so the
+numbers here are based on stdout rather than an independent CSV audit.
+
+- **24,072** scheduler dispatches, **24,061** valid candidate-object
+  samples for *each* object.
+- **Object A:** **1,485** observed changes in the sampled
+  `+0x1A` and/or `+0x1E` fields, change-spacing
+  **median 16.652 ms**, minimum **0.006 ms**, maximum
+  **31,905.445 ms**.
+- **Object B:** **503** changes in the same selected fields,
+  **median 16.652 ms**, minimum **0.007 ms**,
+  maximum **31,905.457 ms**.
+- Object A pointers: **0x2B8104** (22,389 valid samples)
+  and **0x2B88EC** (1,672 samples).
+  Object B pointers: **0x2B815C** (22,389) and
+  **0x2B8AFC** (1,672). The pointer values change
+  between game phases, and that **does not confirm**
+  they identify individual fighters.
+- The **preceding** dispatch callback was
+  `0x2133B5` for **1,021** of A's detected changes
+  and **348** of B's; other preceding EIPs included
+  `0x202D95`, `0x21FF5D`, `0x214697`,
+  `0x214657`. These are *temporal correlations*,
+  **not proof** that the preceding callback wrote
+  any particular field.
+- The analyzer initially reported **zero pointer
+  changes** despite showing two pointer values
+  for each object. This is an *analyzer limitation*:
+  invalid samples (`24,072-24,061=11`) set
+  `previous[slot]=None`; transitions across the
+  invalid gap are therefore not counted as switches.
+  The repo analyzer has now been corrected to track
+  last valid pointer even across gaps and to
+  **label such transitions as gap-separated**;
+  it does not claim the exact change instant.
+- The very long ~31.9-s max interval can reflect
+  stillness, a menu/scene phase, invalid samples or
+  other conditions; no unique explanation is
+  established from the summary alone.
+- The repeated 16.652-ms median is *compatible*
+  with the known ~60.05-Hz timer, but **not
+  direct confirmation of full combat simulation
+  at 60 Hz**.
+
+### Newly committed: writer attribution to candidate object fields
+
+The fork's signal probe now includes a narrow
+`*_object_writes.csv` log. When the already-confirmed
+scheduler dispatch samples its two dynamic object
+pointers, the probe refreshes **four watched field
+addresses**, `A+0x1A`, `A+0x1E`,
+`B+0x1A`, and `B+0x1E`.
+The existing guest memory-store hooks in
+`src/cpu/paging.h` check if the guest STORE
+overlaps one of these watched 16-bit fields.
+The probe compares WORD values immediately
+**before/after the actual observed store** and
+records only changes, including `writer_cs`,
+`writer_cs_base`, **`writer_eip`**,
+writer DS, object pointer, target linear
+address, old/new signed 16-bit values, write
+size and guest PIC time. The original
+`_signal.csv`, `_dispatch.csv`, and code
+snapshots are preserved.
+
+New analyzer `scripts/analyze_mk2_object_writes.py`
+groups writer PCs and object/field combinations
+with timing. Use it to distinguish the instruction
+actually changing the tracked field from the
+previous scheduler callback. It does **not**
+capture arbitrary direct/native host-backed
+writes, may miss aliases, and cannot observe
+a field's writes during a pointer swap before
+the next dispatch refreshes the target.
+
+The new writer code and analyzer are
+**committed but not compiled or runtime-tested
+on Windows**. They are default-off except
+when the existing research variables
+`DOSBOX_MK2_TRACE` and
+`DOSBOX_MK2_SIGNAL_WATCH=1` enable the
+normal-core diagnostic run. No game binary,
+PIT/VGA settings, timing or guest memory
+are modified.
+
+**Next:** update/compile branch and repeat
+the existing normal-core 40,000-cycle
+launcher with active combat during
+emulated seconds 30–150. Upload the new
+`_object_writes.csv` and analyzer output.
+If the dominant writer is `0x21374A`
+or a routine it calls, confirm its disassembly
+and then investigate a genuine simulation
+state-change cadence. A matching 60-Hz
+write frequency alone is insufficient proof.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing project `WildGer/dosbox-staging` branch `mk2-timing-research`. Read **2026-11-10 18:21: all 12 CSVs + 14 callback instruction snapshots analyzed** in this findings doc. User supplied actual 12 CSVs, including full `_dispatch_code.csv` (14 x 256-byte private 32-bit code snapshots) and `_signal_code.csv`. IRQ0 IVT entry now **confirmed 09B0:0000**, producer **09B0:08AF** in same 16-bit real-mode segment increments work DWORD; protected consumer 0180:2054AD resets. Run 18:21: 19,652 scheduler dispatches across 29 task nodes, 127 callback EIPs, 0 overflow; two main nodes ~60Hz; 6515 VGA scanouts and 2808 visible changes with 6515/6515 frame/scanmem and 42000/42000 line/cache agreement. Pending signal accumulates 10 ticks near 35.11–35.24s during phase change. Real 32-bit disassembly: **0x2133B5** handles both global object pointers 0x2B5FC2 and 0x2B6146 via **two CALLs to 0x21374A**, making 0x21374A priority to decode for true object update; **0x22047D** compares WORD fields [obj+1A] from both objects and calculates midpoint/bounds, more likely camera/framing than physics; early **0x2239B2** reads masked bitfield from shared IRQ pointer+0x20, probably input/state processing; **0x22FABF**, **0x22FB73** on many task nodes. None establishes a 60Hz game combat tick. NEW UNTESTED PATCH on fork: extends `*_dispatch.csv` with two candidate object pointers and signed WORD [+1A,+1E] sampled at each dispatch; `scripts/analyze_mk2_object_trace.py` groups observed value changes vs preceding task (correlation only, not proof writer); `*_dispatch_code.csv` additionally captures 8 helper candidates including 0x21374A and 0x2136F6 in private user RAM. NEXT compile, run normal core 40k with `DOSBOX_MK2_TRACE` + `DOSBOX_MK2_SIGNAL_WATCH=1`, upload new `_dispatch.csv` and `_dispatch_code.csv`, inspect helpers and potential actor field change intervals; proceed to direct writer watch if needed. No MK2 code bytes in GitHub; no changes to game memory or PIT/VGA timings.
+> MK2 DOS timing research in GitHub fork `WildGer/dosbox-staging`, branch `mk2-timing-research`; read the latest findings section **2026-11-10 21:01: candidate object field-change cadence and writer probe** and the guide `docs/mk2-timing-research.md`. Original PIT0 ~60.052Hz, VGA ~70.09Hz, IRQ0 IVT 09B0:0000 (real-mode 16-bit); producer at 09B0:08AF increments pending-work DWORD each timer event; protected-mode consumer 0180:2054AD clears it, scheduler at 0180:205531 jumps to many callbacks. Earlier 19,652 dispatches with 29 task nodes and 127 callbacks. User-provided stdout for recent `mk2_normal_40000_20261110_210131_dispatch.csv`: **24,072** task dispatches; 24,061 valid object samples each; A **1,485 field changes**, B **503**; both change interval median **16.652ms**, maxima ~31.905s. `0x2133B5` was preceding callback for 1,021 A changes and 348 B changes, but **this does not establish writer**. Pointers A 0x2B8104 and 0x2B88EC; B 0x2B815C and 0x2B8AFC; old analyzer incorrectly reported 0 pointer changes because the previous value resets on invalid samples. FIXED analyzer to count pointer switch across gaps separately. **NEW UNTESTED BRANCH PATCH**: direct object-field store watcher in `src/hardware/mk2_signal_probe.h`, targeting +0x1A and +0x1E of both dynamic object pointers; logs actual observed guest before/after WORD writes with CS:EIP and PIC timestamp into `*_object_writes.csv` while `DOSBOX_MK2_SIGNAL_WATCH=1` plus `DOSBOX_MK2_TRACE` are active. New `scripts/analyze_mk2_object_writes.py` groups writer PCs, object/field, cadence. NEXT: update and compile Windows normal core 40k, run prior launcher, analyze/upload `_object_writes.csv` and optional `_dispatch_code.csv` helper 0x21374A. Verify actual writer and state transitions before asserting a true 60Hz combat simulation clock. Never alter MK2 EXE, guest state, PIT/VGA clocks or commit copyrighted game bytes to GitHub.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
