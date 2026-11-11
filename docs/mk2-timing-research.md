@@ -1131,6 +1131,76 @@ IRQ0-based task scheduler.
 been committed, but still requires a
 Windows compile and runtime validation.
 
+### NEW: exact writer-code origin for candidate object fields
+
+The first `*_object_writes.csv` summary (user-provided stdout,
+raw CSV not yet uploaded) found **4,958 changed guest
+stores**, all in protected mode. Two guest instruction
+EIPs account for **4,889 = 98.61%**:
+
+- `0180:002315B1`: 2,514 writes, primarily the
+  candidate objects' signed WORD field `+0x1A`
+- `0180:002315B7`: 2,375 writes, primarily
+  signed WORD `+0x1E`
+
+Their instructions are only **6 bytes apart**.
+The observed value-change medians of ~20.8–21.0 ms
+are **conditional field-change rates**, not proof
+of a game-simulation step rate or 48 FPS.
+
+The latest **default-off** source instrumentation
+creates `*_object_writer_code.csv`, capturing
+one 256-byte snapshot **at** each writer EIP
+and another starting 48 bytes before each
+writer EIP. All four code fragments come
+directly from the user's executing MK2 memory
+when the first actual changed store is observed.
+The EIP-aligned snapshots can be decoded from
+their beginning; the preceding-context snapshots
+may start mid-instruction and require careful
+alignment. No bytes or assets from MK2 are
+committed to this repository.
+
+### Run next private writer-code capture
+
+Update and build the `mk2-timing-research`
+branch, then use the existing successful
+`core=normal`, `cpu_cycles_protected=40000`
+launch script with
+`DOSBOX_MK2_SIGNAL_WATCH=1` and
+`DOSBOX_MK2_TRACE=<unique .csv>`.
+Only run the diagnostic after a Windows build
+of the latest commit. The current change is
+**not yet Windows runtime validated**.
+
+After MK2 exits, while in the repo folder:
+
+```powershell
+$folder = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem $folder -Filter "*_object_writer_code.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $latest) {
+    python scripts/extract_mk2_guest_code.py "$($latest.FullName)"
+} else {
+    Write-Host "No object writer snapshots. Rebuild and rerun."
+}
+```
+
+Upload the small `*_object_writer_code.csv`
+and ideally also the contemporaneous
+`*_object_writes.csv`. They remain private
+research files outside GitHub. Disassemble
+`writer_at_002315B1` and
+`writer_at_002315B7` first, then inspect
+control flow and compare with the
+`0x21374A` callback helper to identify
+whether their function actually implements
+per-object motion or another state update.
+Do not equate field-change frequency or
+scheduler cadence with a proven combat tick.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -1154,6 +1224,7 @@ Windows compile and runtime validation.
 - `src/hardware/mk2_signal_probe.h`: opt-in, one-time 256-byte private callback snapshots at 14 selected dispatched EIPs (`_dispatch_code.csv`).
 - `scripts/analyze_mk2_object_trace.py`: analyze candidate object +0x1A/+0x1E field deltas sampled immediately before each timed-task dispatch.
 - `scripts/analyze_mk2_object_writes.py`: attribute observed candidate object field STORE instructions to guest CS:EIP using new `_object_writes.csv` (not merely temporal correlation).
+- `src/hardware/mk2_signal_probe.h`: one-time private 256-byte writer-aligned and preceding-context snapshots at `0x2315B1`/`0x2315B7` in `_object_writer_code.csv`.
 - `src/hardware/mk2_signal_probe.h`: add eight helper-candidate private snippets and candidate object fields to the same opt-in diagnostic streams.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
