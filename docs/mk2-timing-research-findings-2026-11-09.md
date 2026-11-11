@@ -2309,8 +2309,85 @@ beginning at `0x23156C` and its
 computed jump target, without altering
 guest memory or clocks.
 
+## 2026-11-10: next investigation — dynamic entry into 0x23156C, no clocks changed
+
+From the actual uploaded 22:27 private code snippets, callback code at
+`0x230101` and `0x22FB58` directly calls `0x23156C`, near the
+verified position-integration instructions `0x2315B1/0x2315B7`.
+The helper `0x21374A` previously suspected of movement instead
+collects per-object spatial bounds. Actual movement integration
+has been measured at mean ~60.05Hz, one observed integration
+per distinct IRQ0 tick for each tracked main object. The VGA
+continues scanning ~70.09Hz, independently.
+
+**Historical context:** The standard 320x200 VGA mode scans at
+~70Hz (hardware video standard), while the PC's 8253/8254 PIT
+normally runs channel 0 at ~18.2065Hz and can be reprogrammed
+to a desired software interrupt cadence. A game timer at ~60Hz
+alongside a ~70Hz scanout is therefore a plausible deliberate
+separation between game-logic timing and PC video hardware,
+not evidence that MK2 actually *renders 70 distinct frames
+per second*. We have no developer statement explaining
+MK2's original design choice or proof that *all* combat
+subsystems advance at the movement tick.
+
+### Implemented next test: movement-helper entry timing
+
+**Branch `mk2-timing-research`: UNTESTED on Windows**.
+A second, gated, read-only normal-interpreter breakpoint
+at guest `CS=0180, EIP=0x0023156C` now calls the
+`Mk2SignalProbe::OnMovementFunctionEntry()` function
+through `src/hardware/pic.cpp`. It records the
+instruction **being entered**, in the 30–150 emulated-second
+diagnostic window only, before execution:
+
+- `emulated_ms`, EIP, EAX/EBX/ECX/EDX/ESI/EDI/EBP/ESP;
+- DS and SS selector/base;
+- DWORD at SS:ESP as a **possible** return address
+  (not automatically a true caller if reached via JMP);
+- the two current candidate global object pointer values.
+
+Buffered output `*_movement_entry.csv`, flushed periodically
+and at exit. The existing private `*_dispatch_code.csv`
+now captures a 256-byte code excerpt starting at guest
+`0x23156C` as an additional helper candidate. No MK2
+code bytes, disassemblies or assets are committed.
+No game memory or timer values are modified.
+
+New analyzer `scripts/analyze_mk2_movement_entry.py`
+reports actual function-entry cadence, most common stack
+return-address candidates, register/object identity correlations,
+and automatically compares same-run `_signal.csv` IRQ0
+producer events and `_object_steps.csv` full-DWORD ADDs.
+
+**Run:** `git pull --ff-only` on research branch, rebuild
+with `cmake --build --preset=release-windows --parallel 8`,
+then run the previously successful normal-core 40000-cycle
+PowerShell launcher with both
+`DOSBOX_MK2_TRACE=<unique local CSV path>` and
+`DOSBOX_MK2_SIGNAL_WATCH=1`. After MK2 exits:
+
+```powershell
+$dir = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem $dir -Filter "*_movement_entry.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_movement_entry.py "$($latest.FullName)"
+}
+```
+
+**Next inputs:** the resulting `*_movement_entry.csv`,
+`*_dispatch_code.csv` (specifically
+`helper_candidate_0023156C`), and ideally
+same-run `*_object_steps.csv` and `*_signal.csv`
+for exact phase and call-chain checks. Even if
+the entry is executed ~60Hz, check role/conditional
+branches and do not yet identify a universal
+combat-logic frame rate.
+
 ## Context to restore in a new chat
 
-> Mortal Kombat II DOS timing research in `WildGer/dosbox-staging` branch `mk2-timing-research`. READ newest findings section **2026-11-10 22:27 raw 15-stream cross-clock analysis: movement IRQ0-locked, not VGA-locked**. User uploaded ACTUAL all 15 CSVs named `mk2_normal_40000_20261110_222749*.csv`, directly parsed and correlated. CRITICAL correction: alternate object phase does **NOT** run at 70Hz despite a misleading 13.8–14.0ms median individual interval; inter-step gaps strongly alternate ~11–13/~20–22ms, autocorrelation -0.991, 2-gap median 33.3056ms (2 IRQ0 ticks), mean rate **60.10Hz** for 368 steps per object in initial phase. Main two objects each show **4,636 steps per axis**, duration ~77.187s, mean **60.049Hz**, median 16.664ms but bimodal gaps and autocorrelation -0.977, 2-gap median 33.3038ms. Each full-DWORD movement ADD corresponds to a UNIQUE preceding IRQ0 producer tick (0 duplicates); initial phase has ZERO missed ticks and main phase has exactly ONE missing tick at IRQ0 **97582.015950ms**, whose consumer did clear normally; the main task callbacks temporarily disappear and object globals go 0, recovering with transition callbacks at ~97600ms. Thus that omission is associated with a state transition, NOT lost IRQ. IRQ0 producer ~60.052Hz, writer `09B0:08AF`; VGA scanout ~70.09Hz; 8145 frames, 3199 changed, 4946 repeated, 8145/8145 frame/scanmem hash matches, 56000/56000 line/cache matches. Transition 36.136–39.046s between alternate/main objects, no watched ADDs, IRQ pending counter reaches 10 and cleared once at 39040ms, not evidence of catch-up. Earlier private disassembly confirmed 32-bit ADD `0180:002315B1` [EBP+0x18]+=[EBP+0x10] and `0180:002315B7` [EBP+0x1C]+=[EBP+0x14], likely 16.16 fixed-point; 20016 full DWORD ADDs 0 EBX-delta mismatches, 20016 EBP object pointer matches. NEW CODE INSIGHT: `helper_candidate_0021374A` traverses object data to calculate MIN/MAX BOUNDS, **not movement integrator**. The same-run private callback code contains direct calls `0x230101 -> 0x23156C` and `0x22FB58 -> 0x23156C`; relation to 0x2315B1/B7 writer still needs indirect control-flow confirmation. NEXT: decode 0x23156C and/or inspect hit/input/animation routines, do NOT assert full combat-simulation tick from movement alone. No copyrighted game bytes in repo; no guest/PIT/VGA modifications.
+> MK2 DOS timing research on `WildGer/dosbox-staging` branch `mk2-timing-research`. Read the latest section **2026-11-10: next investigation — dynamic entry into 0x23156C, no clocks changed** and the raw 15-stream cross-clock results. Existing proof: IRQ0 producer `09B0:08AF` ~60.05Hz drives scheduler; VGA ~70.09Hz is hardware scanout NOT proof of 70FPS rendering; for both object phases actual full-DWORD movement ADDs at `0180:002315B1`/`002315B7` run mean ~60Hz, one per distinct IRQ0 tick per object; 20016 ADDs with 0 arithmetic mismatches; helper `0x21374A` calculates object bounds not movement. 32-bit callback snippets contain CALLs from `0x230101` and `0x22FB58` to `0x23156C`; actual role/connection to ADDs remains unproven. NEW UNTESTED REPO CHANGE: guarded normal-core entry probe at guest `0180:0023156C`, bridge through `pic.cpp` to `Mk2SignalProbe::OnMovementFunctionEntry()`, writes buffered **`*_movement_entry.csv`** with emulated timestamp, CPU registers, stack-top DWORD (return-address candidate only), current A/B object pointers; ninth helper code snapshot in `*_dispatch_code.csv` captures 256 bytes from `0x23156C`; new `scripts/analyze_mk2_movement_entry.py` analyzes entry times, stack candidates, and same-run `_signal` vs `_object_steps` correlation. NEXT: Windows build and same existing opt-in core=normal 40000 cycles launcher with `DOSBOX_MK2_SIGNAL_WATCH=1` and trace file; user supplies new `_movement_entry.csv` / `_dispatch_code.csv`, optionally same-run signal/steps. Unproven whether all combat subsystems tick at 60Hz; do not alter EXE, PIT or VGA. External references explain 320x200 VGA hardware ~70Hz and programmable PIT IRQ0, but MK2 developer rationale is inferred not documented.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
