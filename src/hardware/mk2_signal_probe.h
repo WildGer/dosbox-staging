@@ -391,7 +391,7 @@ private:
     static constexpr std::size_t DispatchCodeSites = 14;
     static constexpr std::size_t HelperCodeSites = 8;
     static constexpr std::size_t ObjectWatchSites = 4;
-    static constexpr std::size_t ObjectWriterCodeSites = 2;
+    static constexpr std::size_t ObjectWriterCodeSites = 4;
     static constexpr std::size_t ObjectWriterCodeBytes = 256;
     static constexpr uint32_t ObjectWriterContextBytes = 48;
 
@@ -893,22 +893,34 @@ private:
             return;
         }
         static constexpr std::array<uint32_t, ObjectWriterCodeSites> sites = {
-                0x002315b1u, 0x002315b7u};
+                0x002315b1u, 0x002315b1u,
+                0x002315b7u, 0x002315b7u};
         for (std::size_t i = 0; i < sites.size(); ++i) {
             auto& snapshot = object_writer_code[i];
             if (snapshot.captured || change.eip != sites[i]) {
                 continue;
             }
-            if (change.eip < ObjectWriterContextBytes ||
-                static_cast<uint64_t>(change.eip) +
-                        ObjectWriterCodeBytes >
-                        std::numeric_limits<PhysPt>::max()) {
-                return;
+            // Capture both an ALIGNED instruction-start excerpt
+            // and a separate preceding-context excerpt, because the
+            // latter can begin in the middle of an x86 instruction.
+            const bool preceding = (i % 2u) != 0u;
+            if (preceding && change.eip < ObjectWriterContextBytes) {
+                continue;
+            }
+            const uint32_t start_eip = preceding
+                    ? change.eip - ObjectWriterContextBytes
+                    : change.eip;
+            const uint64_t last_exclusive =
+                    static_cast<uint64_t>(change.cs_base) +
+                    start_eip + ObjectWriterCodeBytes;
+            if (last_exclusive >
+                static_cast<uint64_t>(std::numeric_limits<PhysPt>::max())) {
+                continue;
             }
             snapshot.cs = change.cs;
             snapshot.cs_base = change.cs_base;
             snapshot.observed_eip = change.eip;
-            snapshot.start_eip = change.eip - ObjectWriterContextBytes;
+            snapshot.start_eip = start_eip;
             snapshot.emulated_ms = change.emulated_ms;
             for (std::size_t b = 0; b < ObjectWriterCodeBytes; ++b) {
                 const auto linear = static_cast<PhysPt>(
@@ -917,7 +929,6 @@ private:
                         mem_readb<MemOpMode::SkipBreakpoints>(linear);
             }
             snapshot.captured = true;
-            return;
         }
     }
 
@@ -930,8 +941,11 @@ private:
             if (!snapshot.captured || snapshot.written) {
                 continue;
             }
-            object_writer_code_output << "writer_context_" << std::hex
-                                      << std::uppercase << std::setfill('0')
+            const bool preceding =
+                    snapshot.start_eip != snapshot.observed_eip;
+            object_writer_code_output
+                    << (preceding ? "writer_preceding_" : "writer_at_")
+                    << std::hex << std::uppercase << std::setfill('0')
                                       << std::setw(8) << snapshot.observed_eip
                                       << std::dec << std::nouppercase
                                       << std::setfill(' ') << ','
