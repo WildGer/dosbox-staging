@@ -23,6 +23,7 @@ extern bool Mk2SignalInstructionActive;
 extern bool Mk2SignalWatchActive;
 void Mk2SignalOnInstructionBoundary();
 void Mk2SignalOnTaskDispatch();
+void Mk2SignalOnMovementFunctionEntry();
 
 #if C_DEBUGGER
 #include "debugger/debugger.h"
