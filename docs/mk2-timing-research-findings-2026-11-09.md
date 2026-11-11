@@ -2594,8 +2594,110 @@ and same-run CSVs to correlate exact timeline.
 No new data capture, game edits or PIT/VGA
 adjustments are required to get those results.
 
+## 2026-11-11 second expanded 09:55 analysis: ordering and movement without 23156C
+
+**Source:** User pasted the updated
+`scripts/analyze_mk2_movement_entry.py` console
+output for `mk2_normal_40000_20261111_095520_movement_entry.csv`.
+The raw 09:55 CSVs were not uploaded in this turn.
+
+### A stronger distinction than mere same-IRQ coincidence
+
+- `0x23156C`: **3,995** entries across **3,528
+  unique IRQ0 producer intervals**. Zero dropped
+  entries. Three stack-return groups:
+  **0x22FB5D**=3,614 (CALL at 0x22FB58,
+  3,405 intervals); **0x230106**=373
+  (CALL at 0x230101, 373 intervals);
+  **0x21C742**=8 (CALL candidate, unverified).
+- 209 extra entries repeated *from the same
+  caller within a single IRQ0 interval*
+  and 258 additional *cross-caller*
+  interval memberships; 209+258=467
+  extra entry events compared with the
+  3,528 unique intervals.
+- The same-run 32-bit `+0x18` movement
+  ADD stream has **10,742 rows**:
+  primary A/B 5,125 each; alternate
+  A/B 246 each. Across all producers,
+  **5,370 / 5,546 = 96.83%** of IRQ0
+  producer intervals already contain at
+  least one tracked position ADD.
+- **3,528 intervals** contain both a
+  `0x23156C` entry and a tracked ADD.
+  Therefore **5,370 - 3,528 = 1,842
+  ADD-containing IRQ0 intervals have
+  *no observed `0x23156C` entry in
+  that same interval***. This is a
+  significant objection to treating
+  0x23156C as a universally required
+  *per-tick entry point*. There may
+  be alternative paths or phased
+  effects, so do not overstate proof.
+- For every one of the 3,995 entries,
+  there is a **subsequent** observed
+  ADD later within the same IRQ0 interval;
+  *none* has a preceding ADD in that
+  same interval. Median lag to first
+  subsequent ADD by return candidate:
+  - `0x22FB5D` (3614) **2.688 ms**
+    (0.030–5.955ms);
+  - `0x230106` (373) **4.557 ms**
+    (0.032–5.692ms);
+  - `0x21C742` (8) **0.077 ms**
+    (0.052–5.408ms).
+- The first subsequent tracked object
+  was **B, 0x2B815C** for ALL 3,995
+  entries. That could reflect stable
+  per-tick scheduling of B before A,
+  and is **not sufficient to establish
+  that 0x23156C calls B's ADD**.
+- **EAX register differs by caller**:
+  for return `0x22FB5D`, 2,919/3,614
+  entries had EAX equal to a current
+  global tracked object pointer;
+  for return `0x230106`, 0/373; for
+  `0x21C742`, 0/8. These likely are
+  distinct use cases/context; their
+  actual semantics are not established.
+  EBP in all 3,995 entries is task/
+  context-like (`0x275E2C` 3293,
+  `0x2773D4` 702), not object
+  pointer, unlike at the ADDs.
+
+**Crucial interpretation caveat:** A 100%
+same-tick overlap is less compelling when
+~96.83% of all observed producer ticks
+already have a movement ADD. The
+entry-before-ADD result establishes
+ordering, NOT a call chain; instruction-
+level flow or private disassembly
+is required to attribute causes.
+
+### New analyzer improvement
+
+Updated `scripts/analyze_mk2_movement_entry.py`
+with a per-tick 2x2 contingency
+(classification) of entry/ADD and a
+breakdown by observed candidate object
+pointer. This reports **which 32-bit
+movement integrations happen on IRQ0
+intervals without any 0x23156C entry**.
+This update only changes Python;
+no DOSBox rebuild or replay is needed.
+
+**Next:** re-run the Python script on the
+existing same-run CSVs and upload
+`mk2_normal_40000_20261111_095520_dispatch_code.csv`,
+especially `helper_candidate_0023156C`.
+The actual bytes of this routine will
+show whether it performs or invokes
+the ADDs and where EBP is changed.
+Do not update game timings, code, PIT
+or VGA on the basis of this overlap.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research `WildGer/dosbox-staging` branch `mk2-timing-research`. Read latest findings section **2026-11-11 09:55 (expanded script): per-caller IRQ0 multiplicity and ADD overlap** and prior cross-clock findings. User pasted output from `mk2_normal_40000_20261111_095520_movement_entry.csv` (raw current run files NOT uploaded). At 0180:23156C, 3995 entries, zero drops. Confirmed prior disassembly CALL at 0x22FB58 -> return 0x22FB5D on 3614 entries over 3405 IRQ0 tick intervals (209 ticks have 2 calls of this same origin). Other confirmed CALL at 0x230101 -> return 0x230106 on 373 entries, 373 distinct ticks; rare 0x21C742 return 8 entries unverified call. Three callers occupy UNION of 3528 unique tick intervals although 3405+373+8 = 3786 caller-specific tick memberships: **258 cross-caller overlapping memberships**, plus 209 repeated same-caller calls = 467 excess entries (3995-3528). All 3528 ticks with an entry also have movement +0x18 ADD, but this is correlation only (ADD occurs on nearly every active IRQ tick). EBP entry always 0x275E2C/0x2773D4, not candidate object pointer; previous 32-bit integration ADDs at 0x2315B1/0x2315B7 always used EBP=object pointer. 5546 IRQ0 writes, 10742 +0x18 ADDs across tracked A/B. Need disassemble body 0x23156C from PRIVATE `mk2_normal_40000_20261111_095520_dispatch_code.csv` (contains helper_candidate_0023156C) and use exact timestamp ordering to see if 0x23156C can trigger actual ADDs. NEW pure Python enhancement to `scripts/analyze_mk2_movement_entry.py`: separate same-caller vs cross-caller duplicate ticks, print EAX/EBP by caller, calculate intra-tick BEFORE/AFTER ordering and delays between entry and movement ADDs, plus baseline ADD tick share; no Windows rebuild or rerun needed: `git pull --ff-only` and rerun script on same data. User should upload the same-run _dispatch_code.csv plus optionally _movement_entry.csv, _object_steps.csv and _signal.csv. Background: MK2 IRQ0 ~60.05Hz, VGA hardware ~70.09Hz; tracked 16.16 candidate position integrations near 60Hz, full combat logic rate unproven. No copyrighted code/bytes in repo or modified EXE/PIT/VGA.
+> MK2 DOS timing study in `WildGer/dosbox-staging`, branch `mk2-timing-research`. READ latest doc section **2026-11-11 second expanded 09:55 analysis: ordering and movement without 23156C** and prior 15 CSV findings. Latest user-provided analyzer output (raw files NOT attached this turn): 3995 entry events at protected EIP 0x23156C, 3528 distinct preceding IRQ0 ticks; 3614 calls from 0x22FB58 (stack return 0x22FB5D, EAX equals object ptr 2919/3614), 373 from 0x230101 (return 0x230106, EAX object ptr 0/373), 8 potential from 0x21C73D. EBP entry 0x275E2C/0x2773D4, never object ptr. Same-run 10742 movement ADDs at object +0x18 across A/B primary 5125 each and alternate 246 each, occupying 5370/5546=96.83% of IRQ0 producer intervals. Every helper entry was BEFORE a subsequent B-object ADD in its same IRQ tick (0 earlier ADDs), with median delay 2.688ms for main 0x22FB5D caller, 4.557ms for 0x230106, 0.077ms rare; this is ORDERING ONLY not proof helper caused movement (already 96.83% of IRQ ticks contain ADD). Key: **1842 ADD-containing IRQ ticks have NO observed 0x23156C entry** in same tick. This weakens hypothesis of universal per-tick entry path; exact flow/semantics unproven. Different EAX object pointer patterns suggest distinct caller contexts. Expanded Python analyzer `scripts/analyze_mk2_movement_entry.py` now reports movement vs entry 2x2 tick classification and per object pointer groups, to isolate no-helper-entry movement ticks. NEXT: user runs `git pull --ff-only` and reruns script, uploads EXISTING `mk2_normal_40000_20261111_095520_dispatch_code.csv` containing `helper_candidate_0023156C` plus raw `_movement_entry.csv`, `_object_steps.csv`, `_signal.csv` if needed. No new DOSBox run required and do not claim full combat loop 60Hz. Background confirmed 60.05Hz IRQ0/2axis 16.16 position integration, VGA 70.09Hz hardware scanout; no copyrighted guest bytes in repo and no timing modification.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
