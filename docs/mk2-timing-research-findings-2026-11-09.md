@@ -1803,8 +1803,100 @@ and then investigate a genuine simulation
 state-change cadence. A matching 60-Hz
 write frequency alone is insufficient proof.
 
+## Next object-store result: 4,958 changed writes, two dominant PCs (2026-11-10)
+
+**Source:** the user pasted the complete stdout of
+`scripts/analyze_mk2_object_writes.py` from their latest
+normal-core guest store capture. The raw
+`*_object_writes.csv` was **not uploaded** in this turn,
+so all figures below are based on the supplied analysis,
+not on independently re-parsed event rows.
+
+- **4,958 observed changed guest stores**, all in
+  protected mode. The new hook detects the
+  *actual modifying guest instruction*, not just
+  the last dispatched callback.
+- **`0180:002315B1` wrote 2,514 changes**:
+  1,847 to candidate A `+0x1A` and 667 to
+  candidate B `+0x1A`. Its within-writer
+  aggregate median event spacing was 12.218 ms;
+  this is a mixture of object and phase events,
+  NOT an independent simulation tick.
+- **`0180:002315B7` wrote 2,375 changes**:
+  2,043 to A `+0x1E` and 332 to B `+0x1E`.
+  These two PCs are only **6 bytes apart**,
+  have the same CS/CS base, and account for
+  **4,889 / 4,958 = 98.61% of all observed
+  changed field stores**.
+- Remaining **69 observed changes** are
+  scattered across 11 other instruction EIPs,
+  including `0x2027DA` (28) and
+  `0x20153E` (17).
+- By object/field, observed changed stores and
+  their median *conditional change spacing*:
+  - A `+0x1A`: **1,858**, median **20.759 ms**
+  - A `+0x1E`: **2,063**, median **20.981 ms**
+  - B `+0x1A`: **694**, median **20.919 ms**
+  - B `+0x1E`: **343**, median **20.974 ms**
+- Observed pointers during actual field changes:
+  A `0x2B8104` (3,921 changes),
+  B `0x2B815C` (1,027 changes),
+  B `0x2B8AFC` (10 changes).
+- Typical A `+0x1E` signed WORD transitions
+  include `25 -> 22`, `22 -> 25`,
+  `83 -> 76`, `46 -> 41`, `14 -> 15`,
+  `14 -> 13`; this shows value movement but
+  does NOT itself identify positions, velocities,
+  animation frames or sprite semantics.
+
+**Interpretation:** Two nearby protected-mode
+instructions write the selected fields of both
+active objects. This is a much more actionable
+candidate *per-object state update* than the
+60-Hz scheduler count alone, but the
+`+0x1A`/`+0x1E` field semantics and the
+writer routine/callers are not yet verified.
+Field change frequency ~20.8–21.0ms does not
+mean MK2 runs at 48Hz: a field can remain
+unchanged while its logic executes each
+16.652-ms timer period. Very small
+inter-write intervals also represent
+multiple object/field writes within one pass.
+
+### New tiny private code capture to resolve writer instructions
+
+Committed (NOT yet Windows compiled/runtime tested)
+an opt-in `*_object_writer_code.csv` generated
+on the **first real changed guest store** at
+`0180:002315B1` or `0180:002315B7`.
+
+For each of those two actual writer EIPs, capture
+two 256-byte guest snapshots:
+(1) starting **exactly** at the instruction EIP
+for a reliable x86 disassembly origin;
+(2) starting 48 bytes earlier to inspect the
+surrounding function, with a warning that this
+second snippet can begin mid-instruction.
+This is four tiny private blobs and is
+compatible with the existing
+`scripts/extract_mk2_guest_code.py`.
+It does NOT change guest memory or timing
+configuration and commits no game code bytes.
+
+**Next:** update+build latest fork, run existing
+normal-core 40k signal-watch launcher through
+emulated seconds 30–150, upload the new
+`*_object_writer_code.csv` (and preferably
+the raw `*_object_writes.csv`) for disassembly
+and grouping by timestamp/object. Determine
+whether writer EIPs lie inside a movement/
+position integration routine, and identify
+their caller back to the scheduler's per-object
+callback (especially `0x21374A`) before
+identifying any real combat simulation tick.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research in GitHub fork `WildGer/dosbox-staging`, branch `mk2-timing-research`; read the latest findings section **2026-11-10 21:01: candidate object field-change cadence and writer probe** and the guide `docs/mk2-timing-research.md`. Original PIT0 ~60.052Hz, VGA ~70.09Hz, IRQ0 IVT 09B0:0000 (real-mode 16-bit); producer at 09B0:08AF increments pending-work DWORD each timer event; protected-mode consumer 0180:2054AD clears it, scheduler at 0180:205531 jumps to many callbacks. Earlier 19,652 dispatches with 29 task nodes and 127 callbacks. User-provided stdout for recent `mk2_normal_40000_20261110_210131_dispatch.csv`: **24,072** task dispatches; 24,061 valid object samples each; A **1,485 field changes**, B **503**; both change interval median **16.652ms**, maxima ~31.905s. `0x2133B5` was preceding callback for 1,021 A changes and 348 B changes, but **this does not establish writer**. Pointers A 0x2B8104 and 0x2B88EC; B 0x2B815C and 0x2B8AFC; old analyzer incorrectly reported 0 pointer changes because the previous value resets on invalid samples. FIXED analyzer to count pointer switch across gaps separately. **NEW UNTESTED BRANCH PATCH**: direct object-field store watcher in `src/hardware/mk2_signal_probe.h`, targeting +0x1A and +0x1E of both dynamic object pointers; logs actual observed guest before/after WORD writes with CS:EIP and PIC timestamp into `*_object_writes.csv` while `DOSBOX_MK2_SIGNAL_WATCH=1` plus `DOSBOX_MK2_TRACE` are active. New `scripts/analyze_mk2_object_writes.py` groups writer PCs, object/field, cadence. NEXT: update and compile Windows normal core 40k, run prior launcher, analyze/upload `_object_writes.csv` and optional `_dispatch_code.csv` helper 0x21374A. Verify actual writer and state transitions before asserting a true 60Hz combat simulation clock. Never alter MK2 EXE, guest state, PIT/VGA clocks or commit copyrighted game bytes to GitHub.
+> MK2 DOS timing research `WildGer/dosbox-staging` on `mk2-timing-research`. Read newest findings section **Next object-store result: 4,958 changed writes, two dominant PCs (2026-11-10)** and prior sections/guide. Confirmed IRQ0 vector `09B0:0000`, timer producer `09B0:08AF` incrementing pending DWORD around 60.05Hz and protected consumer `0180:2054AD` clearing; scheduler `0180:205531` executes many timer-task callbacks, principal callback `0x2133B5` runs ~60Hz and calls `0x21374A` per object. User pasted latest `scripts/analyze_mk2_object_writes.py` stdout: **4,958 actual changed stores**, all protected mode, 2 dominant writer EIPs **0180:002315B1** (2,514 writes to object A/B field +0x1A) and **0180:002315B7** (2,375 writes to object A/B field +0x1E). These two writer instructions only 6 bytes apart cause **4,889 / 4,958 = 98.61%** of observed field changes. Per-field median conditional value-change intervals ~20.8–21.0ms, not proof of 48Hz or any simulation tick. Other 69 changed writes across 11 EIPs. Field meanings (position vs other) and caller chain are NOT yet proven. NEW UNTESTED code patch in `src/hardware/mk2_signal_probe.h`: on first actual changed store at 0x2315B1/0x2315B7, emit 4 tiny 256-byte private code slices (2 writer-aligned; 2 with 48 prior bytes) into `*_object_writer_code.csv` in same existing normal-core 40k signal-watch trace. Next: Windows compile+run, upload `*_object_writer_code.csv` plus optional raw `*_object_writes.csv`; disassemble actual writer instructions and trace toward per-object update callback 0x21374A. Do not commit game bytes, alter executable, PIT/VGA timing, or assert combat simulation frequency without real state-update evidence.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
