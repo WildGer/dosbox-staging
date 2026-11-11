@@ -1328,6 +1328,70 @@ Do not alter timing parameters based on
 a per-event median or equate image hash
 changes with game-state updates.
 
+### Dynamic movement-helper entry probe (guest 0180:0023156C)
+
+The latest experiment follows `CALL 0x23156C` observed
+in the user's own private MK2 32-bit callback disassembly.
+The previously identified helper `0x21374A` traverses
+object bounds; it is **not** the movement integrator.
+The 32-bit integration ADDs at `0x2315B1/0x2315B7`
+remain the verified writers, observed once per IRQ0 tick
+per object on average. We are now measuring the
+**actual entry** into the candidate shared helper
+and seeking caller evidence.
+
+After pulling the `mk2-timing-research` branch
+and compiling, the existing normal-core 40,000-cycle
+launcher with `DOSBOX_MK2_SIGNAL_WATCH=1`
+and a unique `DOSBOX_MK2_TRACE` file will also
+write `*_movement_entry.csv`, with the actual
+`0180:0023156C` entry timestamp, registers,
+DS/SS segment bases, current two object pointers
+and the stack top DWORD as a **return address
+candidate**. A separate snapshot
+`helper_candidate_0023156C` appears in the
+private `*_dispatch_code.csv`. No game
+binary modifications or timing parameter changes
+are introduced.
+
+```powershell
+# Execute in the DOSBox Staging repository after running MK2
+$dir = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem $dir -Filter "*_movement_entry.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_movement_entry.py "$($latest.FullName)"
+}
+```
+
+The script will automatically compare matching
+`*_signal.csv` IRQ0 event timestamps and
+`*_object_steps.csv` full-DWORD ADD events
+from the *same run* when present. Upload
+`*_movement_entry.csv`, `*_dispatch_code.csv`
+and ideally those companion CSVs for the next
+step. The entry recorder only identifies *entry
+occurrences*. A DWORD at SS:ESP does not
+automatically prove a caller (a JMP may
+enter without pushing a return address),
+and an entry cadence is not automatically
+all of combat's simulation rate.
+
+Historical caveat: VGA standard 320x200
+hardware scanned near 70Hz, while DOS
+software could reprogram the PIT0 IRQ cadence
+(default PC BIOS ~18.2065Hz) for a logic
+clock of its own. This can explain a ~60Hz
+movement system and ~70Hz scanout without
+implying ~70 new game-rendered frames
+per second. We do not have a verified
+Mortal Kombat II developer account of why
+its DOS conversion used this design.
+
+**Validation status:** source changes committed,
+**not yet compiled or runtime-validated on Windows**.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -1353,6 +1417,8 @@ changes with game-state updates.
 - `scripts/analyze_mk2_object_writes.py`: attribute observed candidate object field STORE instructions to guest CS:EIP using new `_object_writes.csv` (not merely temporal correlation).
 - `src/hardware/mk2_signal_probe.h`: one-time private 256-byte writer-aligned and preceding-context snapshots at `0x2315B1`/`0x2315B7` in `_object_writer_code.csv`.
 - `scripts/analyze_mk2_object_steps.py`: report every captured 32-bit ADD integration step and separate fractional-only versus integer-coordinate changes (`_object_steps.csv`).
+- `src/cpu/core_normal.cpp` / `src/hardware/pic.cpp` / `src/hardware/mk2_signal_probe.h`: gated dynamic entry capture at guest `0180:0023156C` (`_movement_entry.csv`) and private helper code snapshot.
+- `scripts/analyze_mk2_movement_entry.py`: analyze same-run helper-entry cadence, candidate caller returns and correlation with IRQ0 and object DWORD additions.
 - `src/hardware/mk2_signal_probe.h`: add eight helper-candidate private snippets and candidate object fields to the same opt-in diagnostic streams.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
