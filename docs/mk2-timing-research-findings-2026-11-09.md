@@ -2696,8 +2696,74 @@ the ADDs and where EBP is changed.
 Do not update game timings, code, PIT
 or VGA on the basis of this overlap.
 
+## 2026-11-11 expanded tick contingency: 1596 primary and 246 alternate movement ticks without helper
+
+**Source:** user posted an additional stdout run of the extended
+`scripts/analyze_mk2_movement_entry.py` for the SAME 09:55
+capture `mk2_normal_40000_20261111_095520_movement_entry.csv`.
+The raw 09:55 CSVs remain unuploaded in this conversation;
+these conclusions come from the printed summary.
+
+- Across **5,546** observed IRQ0 producer events, **5,370**
+  have tracked `+0x18` position integration. Of those,
+  **3,528** coincide with `0x23156C` entries, **1,842**
+  have no entry in that same tick. **176** IRQ0 intervals
+  contain neither tracked movement nor helper entry, and
+  **zero** intervals contain helper entry without movement.
+- Critically, **both primary A and B** have **5,125 ADD
+  operations across 5,124 DISTINCT producer intervals**;
+  of those intervals **3,528** contain a helper entry and
+  **1,596 do not**. Therefore **31.15%** of the primary
+  observed movement intervals lack the helper entry, even
+  within the same phase. This is stronger than just the
+  initial phase's absent entries.
+- Both **alternate-phase A and B** have **246 ADDs in
+  246 distinct IRQ intervals**; **zero** of these
+  contain a `0x23156C` entry. The two phases therefore
+  have potentially different task sets, despite both
+  showing actual integration near the PIT cadence.
+- Difference between **5,125 position ADDs** and
+  **5,124 distinct producer intervals** in *each*
+  primary object implies at least one same-IRQ
+  interval has more than one ADD for each object.
+  This should be checked against raw timestamps and
+  producer events before describing it as a genuine
+  simulation catch-up or double tick.
+- All **3,995** helper entries are temporally before
+  a subsequent B-object position ADD in their IRQ
+  interval. But because **96.83%** of IRQ events
+  already have a movement ADD and **1,596** primary
+  movement intervals lack the helper, consistent
+  ordering does **not** establish that this helper
+  is a mandatory caller of the two ADDs.
+- In caller 0x22FB58, EAX equals a current tracked
+  object pointer 2,919/3,614 times. In caller 0x230101,
+  0/373. EBP at helper entry remains 0x275E2C or
+  0x2773D4, while the verified motion ADD writer uses
+  an object pointer in EBP. This might be separate
+  task context or distinct helper roles, *not
+  confirmed*.
+
+**Interpretation:** A universal 60Hz game-physics loop
+should not be equated with the guest instruction
+`0x23156C`. The helper could instead perform
+auxiliary/conditional movement or state work.
+Its actual semantics and the code path between
+this helper and the 32-bit integrator remain
+unverified. The next step requiring *new
+information* is disassembling the already
+generated `mk2_normal_40000_20261111_095520_dispatch_code.csv`,
+particularly the row
+`helper_candidate_0023156C`, plus comparing
+raw `_movement_entry.csv`, `_object_steps.csv`
+and `_signal.csv` to resolve the extra
+same-IRQ ADD(s). There is no reason to run the
+same analyzer again without additional code
+or CSV evidence. No change to MK2 executable,
+PIT, VGA, or timing policy is justified.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing study in `WildGer/dosbox-staging`, branch `mk2-timing-research`. READ latest doc section **2026-11-11 second expanded 09:55 analysis: ordering and movement without 23156C** and prior 15 CSV findings. Latest user-provided analyzer output (raw files NOT attached this turn): 3995 entry events at protected EIP 0x23156C, 3528 distinct preceding IRQ0 ticks; 3614 calls from 0x22FB58 (stack return 0x22FB5D, EAX equals object ptr 2919/3614), 373 from 0x230101 (return 0x230106, EAX object ptr 0/373), 8 potential from 0x21C73D. EBP entry 0x275E2C/0x2773D4, never object ptr. Same-run 10742 movement ADDs at object +0x18 across A/B primary 5125 each and alternate 246 each, occupying 5370/5546=96.83% of IRQ0 producer intervals. Every helper entry was BEFORE a subsequent B-object ADD in its same IRQ tick (0 earlier ADDs), with median delay 2.688ms for main 0x22FB5D caller, 4.557ms for 0x230106, 0.077ms rare; this is ORDERING ONLY not proof helper caused movement (already 96.83% of IRQ ticks contain ADD). Key: **1842 ADD-containing IRQ ticks have NO observed 0x23156C entry** in same tick. This weakens hypothesis of universal per-tick entry path; exact flow/semantics unproven. Different EAX object pointer patterns suggest distinct caller contexts. Expanded Python analyzer `scripts/analyze_mk2_movement_entry.py` now reports movement vs entry 2x2 tick classification and per object pointer groups, to isolate no-helper-entry movement ticks. NEXT: user runs `git pull --ff-only` and reruns script, uploads EXISTING `mk2_normal_40000_20261111_095520_dispatch_code.csv` containing `helper_candidate_0023156C` plus raw `_movement_entry.csv`, `_object_steps.csv`, `_signal.csv` if needed. No new DOSBox run required and do not claim full combat loop 60Hz. Background confirmed 60.05Hz IRQ0/2axis 16.16 position integration, VGA 70.09Hz hardware scanout; no copyrighted guest bytes in repo and no timing modification.
+> MK2 DOS timing research `WildGer/dosbox-staging` branch `mk2-timing-research`. READ latest findings section **2026-11-11 expanded tick contingency: 1596 primary and 246 alternate movement ticks without helper**. User provided stdout only of `mk2_normal_40000_20261111_095520_movement_entry.csv`, no raw CSV nor 09:55 code snapshot yet. In 5546 produced IRQ0 ticks: 5370 ticks with tracked movement ADDs, 3528 both movement and entry at 0180:23156C, 1842 movement without helper entry, 0 helper without movement, 176 neither. For primary A/B pointers 0x2B8104/0x2B815C EACH: 5125 ADDs on 5124 distinct ticks; 3528 ticks with helper entry and **1596 (31.15%) WITHOUT**, so helper is not a mandatory per-tick entry for movement, even in principal phase. Alternate phase A/B 0x2B88EC/0x2B8AFC: 246 ADDs over 246 ticks each, zero helper entry. One extra same-IRQ ADD per primary object inferred from difference counts vs unique tick interval; must verify timestamp and state. At 23156C: 3995 entries, 3614 from CALL at 22FB58 (return 22FB5D), 373 from CALL at 230101 (return 230106), 8 candidate other. 209 extra repeat entries within same caller tick, 258 cross-caller extra memberships; all entries precede a B-object ADD within same tick, median later ADD delay 2.688ms / 4.557ms but movement already happens on 96.83% of all producer ticks -> ordering/coincidence not proof causality. EBP helper context 0x275E2C/0x2773D4, while EBP at position integrator 0180:2315B1/B7 equals object pointer, likely 16.16 accumulators, executes ~60Hz. VGA ~70.09Hz hardware refresh not 70 unique rendering fps. Critical next user input already generated: `mk2_normal_40000_20261111_095520_dispatch_code.csv` containing helper_candidate_0023156C to disassemble function, and optionally SAME RUN raw `_movement_entry.csv`, `_object_steps.csv`, `_signal.csv` to inspect same-tick extra ADD and causal ordering. Do not ask them to repeat same analysis or rerun MK2 needlessly. No copyrighted guest code in GitHub, do not change timing or guest executable.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
