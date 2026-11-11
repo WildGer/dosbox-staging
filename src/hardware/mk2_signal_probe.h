@@ -163,6 +163,33 @@ public:
                 entry.ds = writer_ds;
                 entry.ds_base = writer_ds_base;
                 entry.protected_mode = cpu.pmode;
+                // Disassembled x86 0x2315B1/0x2315B7 use
+                // ADD DWORD PTR [EBP+0x18/+0x1C], EBX.
+                // The prior object watch observes only the upper WORD
+                // at +0x1A/+0x1E; it misses fractional-only updates.
+                // Capture the ENTIRE DWORD for every recognized ADD,
+                // even when the upper WORD remains unchanged.
+                const uint32_t position_offset =
+                        (watch.field_offset == 0x1au) ? 0x18u : 0x1cu;
+                const uint32_t writer_for_field =
+                        (position_offset == 0x18u) ? 0x002315b1u
+                                                    : 0x002315b7u;
+                const uint64_t position_linear =
+                        static_cast<uint64_t>(watch.object_linear) +
+                        position_offset;
+                entry.is_position_add =
+                        cpu.pmode && writer_cs == 0x0180u &&
+                        writer_cs_base == 0 &&
+                        writer_eip == writer_for_field &&
+                        size == 4 &&
+                        address == position_linear;
+                if (entry.is_position_add) {
+                    entry.position_before =
+                            mem_readd<MemOpMode::SkipBreakpoints>(
+                                    static_cast<PhysPt>(position_linear));
+                    entry.expected_delta = reg_ebx;
+                    entry.writer_ebp = reg_ebp;
+                }
             }
         }
         return true;
@@ -183,6 +210,42 @@ public:
             entry.active = false;
             const auto after = mem_readw<MemOpMode::SkipBreakpoints>(
                     copy.watch.field_linear);
+            if (copy.is_position_add && object_steps_output.is_open()) {
+                const auto position_offset =
+                        (copy.watch.field_offset == 0x1au) ? 0x18u : 0x1cu;
+                const auto position_linear = static_cast<PhysPt>(
+                        copy.watch.object_linear + position_offset);
+                const uint32_t position_after =
+                        mem_readd<MemOpMode::SkipBreakpoints>(position_linear);
+                const uint32_t actual_delta =
+                        position_after - copy.position_before;
+                const int16_t integer_before = static_cast<int16_t>(
+                        copy.position_before >> 16u);
+                const int16_t integer_after = static_cast<int16_t>(
+                        position_after >> 16u);
+                object_steps_output << ++object_step_count << ','
+                                    << std::fixed << std::setprecision(6)
+                                    << copy.emulated_ms << ','
+                                    << (copy.watch.slot < 2 ? 'A' : 'B')
+                                    << ',' << position_offset
+                                    << ',' << copy.watch.object_pointer
+                                    << ',' << copy.watch.object_linear
+                                    << ',' << copy.eip
+                                    << ',' << copy.position_before
+                                    << ',' << position_after
+                                    << ',' << actual_delta
+                                    << ',' << copy.expected_delta
+                                    << ',' << (actual_delta ==
+                                              copy.expected_delta ? 1 : 0)
+                                    << ',' << integer_before
+                                    << ',' << integer_after
+                                    << ',' << (integer_before !=
+                                              integer_after ? 1 : 0)
+                                    << ',' << copy.writer_ebp
+                                    << ',' << copy.expected_delta
+                                    << ',' << copy.cs
+                                    << ',' << copy.ds << '\n';
+            }
             if (after != copy.before) {
                 CaptureDominantObjectWriterCode(copy);
             }
@@ -375,6 +438,9 @@ public:
                 object_write_output.flush();
             }
             FlushObjectWriterCode();
+            if (object_steps_output.is_open()) {
+                object_steps_output.flush();
+            }
         }
     }
 
@@ -428,6 +494,10 @@ private:
         uint16_t ds = 0;
         uint32_t ds_base = 0;
         bool protected_mode = false;
+        bool is_position_add = false;
+        uint32_t position_before = 0;
+        uint32_t expected_delta = 0;
+        uint32_t writer_ebp = 0;
     };
 
     struct DispatchCodeSnapshot {
@@ -614,6 +684,23 @@ private:
                     "snapshot_start,bytes_hex,code_bits\n";
         }
 
+        const auto object_steps_path = trace.substr(0, cut) +
+                                       "_object_steps" +
+                                       (cut < trace.size()
+                                                ? trace.substr(cut)
+                                                : ".csv");
+        object_steps_output.open(object_steps_path,
+                                 std::ios::out | std::ios::trunc);
+        if (object_steps_output.is_open()) {
+            object_steps_output <<
+                    "event_index,emulated_ms,object,position_offset,"
+                    "object_pointer,object_linear,writer_eip,"
+                    "old_raw32,new_raw32,actual_delta32,expected_delta32,"
+                    "delta_matches,old_integer,new_integer,"
+                    "integer_changed,writer_ebp,writer_ebx,"
+                    "writer_cs,writer_ds\n";
+        }
+
         enabled = true;
         Mk2SignalWatchActive = true;
     }
@@ -630,6 +717,9 @@ private:
             object_write_output.flush();
         }
         FlushObjectWriterCode();
+        if (object_steps_output.is_open()) {
+            object_steps_output.flush();
+        }
     }
 
     // The source at 09B0:08AF has now been observed through both
@@ -1141,6 +1231,7 @@ private:
     std::ofstream dispatch_code_output = {};
     std::ofstream object_write_output = {};
     std::ofstream object_writer_code_output = {};
+    std::ofstream object_steps_output = {};
     std::array<Entry, BufferCount> buffer = {};
     std::array<CodeSnapshot, CodeSiteCount> code_snapshots = {};
     std::array<DispatchRow, DispatchBufferSize> dispatch_buffer = {};
@@ -1150,6 +1241,7 @@ private:
     std::array<ObjectPending, ObjectWatchSites> object_pending = {};
     std::array<ObjectWriterSnapshot, ObjectWriterCodeSites> object_writer_code = {};
     uint64_t object_write_count = 0;
+    uint64_t object_step_count = 0;
     std::size_t dispatch_count = 0;
     uint64_t dispatch_written = 0;
     uint64_t dispatch_dropped = 0;
