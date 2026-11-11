@@ -1266,6 +1266,68 @@ simulation tick unless corroborated with
 input, hit tests, animations and actual
 per-tick state transitions.
 
+### 22:27 raw-stream comparison: both observed movement phases follow IRQ0
+
+The user uploaded **all 15 actual CSVs** from
+`mk2_normal_40000_20261110_222749`. Comparing
+the full-DWORD movement ADD timestamps in
+`*_object_steps.csv` to **producer IRQ0
+timestamps** in `*_signal.csv` demonstrates
+a mean ~**60Hz** motion integration cadence
+for both the first and principal object pairs.
+
+Do **not** infer an alternate ~70Hz engine
+step from the early-pair interval median
+of ~13.8–14.0ms! Intervals strongly
+alternate ~11–13 and ~20–22ms. Two
+consecutive interval lengths have median
+~33.305ms, in agreement with **two
+16.652ms PIT ticks**. Time-span frequency
+is ~60.10Hz for each early object and
+~60.049Hz for the principal objects.
+
+Every recorded `+0x18` ADD of a
+given watched object corresponds to a
+**distinct preceding producer IRQ0 tick**,
+with no duplicates. The initial pair
+covers 368 consecutive ticks; the
+principal pair covers 4,636 ticks with
+one absent tick at emulated 97.582s,
+where the producer and consumer continue,
+but principal task callbacks temporarily
+disappear and sampled object pointers
+become zero during a state transition.
+
+VGA output is separate: median scanout
+spacing **14.268ms (~70.09Hz)**,
+**8,145 scanouts**, **3,199 visible
+changes**, **4,946 repeats**.
+The `_frames` visible hash matches
+`_scanmem` on **8,145/8,145** rows;
+`_lines` agrees with renderer cache
+on **56,000/56,000** samples.
+
+A correction to the early code hypothesis:
+`0x21374A` (previously a candidate
+position integrator) actually scans
+object extents and calculates bounds.
+The private callback code at `0x230101`
+and `0x22FB58` calls `0x23156C`,
+close to the confirmed ADD writer
+instructions `0x2315B1`/`0x2315B7`.
+The intervening control path has not
+been decoded fully.
+
+See the newest dated findings section
+for numeric cross-stream verification,
+the transition exception and limitations.
+**This establishes the sampled object
+movement-integration clock, not
+a universal combat simulation tick.**
+Do not alter timing parameters based on
+a per-event median or equate image hash
+changes with game-state updates.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
