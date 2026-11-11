@@ -1167,8 +1167,8 @@ private:
             movement_entry_output << ++movement_entry_written << ','
                                   << std::fixed << std::setprecision(6)
                                   << PIC_FullIndex()
-                                  << ",0,0,0,0,0,0,0,0,0,0,0,0,0,"
-                                  << "0,0,0,0," << movement_entry_dropped
+                                  << ",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,"
+                                  << movement_entry_dropped
                                   << '\n';
             movement_entry_dropped = 0;
         }
