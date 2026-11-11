@@ -2028,8 +2028,130 @@ the caller chain, the previously captured
 `*_dispatch_code.csv` helper snapshot for
 `0x21374A` may be useful.
 
+## 2026-11-10 22:27: actual full-DWORD motion integration cadence confirmed
+
+**Evidence source:** User pasted full stdout from
+`scripts/analyze_mk2_object_steps.py` for
+`mk2_normal_40000_20261110_222749_object_steps.csv`.
+The raw CSV itself was NOT uploaded, so the frequencies,
+counts and pointer groups below are grounded in
+the supplied analyzer output, not independently
+re-parsed event rows.
+
+### The full 32-bit movement arithmetic is independently validated
+
+- **20,016** observed full-DWORD ADD stores, **0**
+  EBX-versus-(after-before modulo 2^32) mismatches.
+- **20,016/20,016** cases: EBP equals the
+  monitored object's linear pointer. The two
+  inferred fields truly belong to the object
+  whose pointer is sampled at dispatch.
+- Exactly **10,008** stores at `0180:002315B1`
+  (DWORD `[EBP+0x18] += DWORD [EBP+0x10]`)
+  and **10,008** at `0180:002315B7`
+  (DWORD `[EBP+0x1C] += DWORD [EBP+0x14]`).
+- The observed increment values strongly
+  corroborate a **16.16 fixed-point**
+  position representation: e.g. +196,608
+  equals +3.0; -98,304 equals -1.5;
+  +153,600 equals +2.34375; +368,640
+  equals +5.625 if a 16-bit fraction.
+  Earlier code reads the high WORDs
+  `+0x1A`/`+0x1E` as signed coordinates.
+  The specific objects' gameplay identities
+  and physical units still need confirmation.
+
+### Two pointer regimes in the same diagnostic run
+
+| Candidate | Pointer | Axis offset | Stores | Median spacing |
+|---|---|---|---:|---:|
+| A primary | `0x2B8104` | `+0x18` | **4,636** | **16.664 ms** |
+| A primary | `0x2B8104` | `+0x1C` | **4,636** | **16.664 ms** |
+| B primary | `0x2B815C` | `+0x18` | **4,636** | **16.664 ms** |
+| B primary | `0x2B815C` | `+0x1C` | **4,636** | **16.664 ms** |
+| A alternate | `0x2B88EC` | `+0x18` | **368** | **13.806 ms** |
+| A alternate | `0x2B88EC` | `+0x1C` | **368** | **13.806 ms** |
+| B alternate | `0x2B8AFC` | `+0x18` | **368** | **13.998 ms** |
+| B alternate | `0x2B8AFC` | `+0x1C` | **368** | **13.998 ms** |
+
+Therefore **18,544 of the 20,016 observed
+stores** are to primary objects with median
+`16.664 ms` (~**60.01 updates/sec** when
+expressed as inverse of the median).
+This is *direct, no-op-inclusive evidence*
+for approximately **60-Hz 32-bit movement
+integration** of **both primary objects**,
+not merely a 60-Hz IRQ counter or task
+scheduler. The slight difference from
+16.652-ms PIT median could reflect guest
+scheduling variation and measurement
+granularity; only cross-correlation of
+raw event timestamps can confirm phase
+locking.
+
+The alternate objects account for **1,472
+stores**, with medians **13.8–14.0 ms**,
+roughly 71–72.4/sec by reciprocals.
+All those stores had **zero increments**.
+Their phase/context is unknown. Their
+observed cadence is near but does NOT
+by itself establish synchronization with
+~70.09-Hz VGA refresh. A pointer grouping
+does not automatically identify combat
+versus menu states.
+
+### Critical explanation for the earlier misleading ~21-ms medians
+
+Per the stdout summaries:
+- High/integer WORD changed in **3,703**
+  stores: A +0x18 = 1,290, A +0x1C = 1,883,
+  B +0x18 = 302, B +0x1C = 228.
+- Only fractional/low-WORD changed in **112**
+  stores: 35 + 63 + 0 + 14.
+- Full DWORD unchanged (zero increment) in
+  **16,201** stores (including all 1,472
+  alternate-object stores).
+
+These categories sum **20,016**. The
+prior ~20.8–21.0ms field-change medians
+counted only the **3,703 changes of the
+integer-high WORD**, not every invocation.
+The complete ADD trace reveals many
+legitimate stationary passes, while
+maintaining a consistent ~60-Hz cadence
+for the primary objects.
+
+### Still unproven: complete combat-simulation rate
+
+The **movement integration instruction**
+for the two primary objects runs near
+60 Hz. This is not automatically evidence
+that input sampling, hit detection,
+animation state, damage resolution or
+all gameplay logic execute at the same
+cadence. Moreover the primary per-axis
+intervals span roughly **6.4–39.7 ms**,
+not a perfect timer period; median alone
+does not reveal skipped, double-scheduled
+or catch-up steps.
+
+**Preferred NEXT step: upload existing
+raw CSVs from the 22:27 run**:
+`*_object_steps.csv`,
+`*_signal.csv`, `*_dispatch.csv`,
+and `*_frames.csv`. They should share
+the same timestamp prefix
+`mk2_normal_40000_20261110_222749`.
+No need to re-run MK2 for that comparison.
+Use raw timestamps to distinguish
+cross-stream ordering, timer phase,
+longer/shorter intervals, exact pointer
+transition times and any correlation with
+VGA repeats. Only then pursue input/
+collision/animation update attribution.
+
 ## Context to restore in a new chat
 
-> MK2 DOS timing research `WildGer/dosbox-staging`, branch `mk2-timing-research`. Read latest findings **Confirmed object position accumulator writes from 4 private snippets (2026-11-10)**. User uploaded four 256-byte private .bin snapshots at guest 0x2315B1/0x2315B7 and 48 preceding bytes; all overlaps verified exactly with Python and objdump. Critical decoded code: `mov ebx,[ebp+10]`; `ADD DWORD [ebp+18],ebx` at **0180:002315B1**; `mov ebx,[ebp+14]`; `ADD DWORD [ebp+1C],ebx` at **0180:002315B7**. Both are gated by `DS:[0x2B5A88]` and followed by flags/position-bound tests. Prior watchers of WORD [+1A] and [+1E] were observing **only the upper 16 bits** of these two 32-bit accumulators, so ~20.8-21.0ms changes do NOT mean 48Hz update loop; likely 16.16 fixed-point two-axis coordinates/increments, though units and object identity not proven. User's prior actual guest write summary: 4958 changed high-WORD stores, 4889 (98.61%) by those two ADD PCs, all protected mode. Timer producer IRQ0 09B0:08AF ~60.05Hz, VGA ~70.09Hz, scheduler 0180:205531 with primary callback 0x2133B5 ~60Hz, helper 0x21374A calls once per candidate object. **NEW UNTESTED PATCH** in src/hardware/mk2_signal_probe.h adds `*_object_steps.csv`: log each observed full 32-bit store at writer EIP 2315B1/2315B7 to watched objects (including fractional-only/high-WORD unchanged and EBX=0), with before/after DWORD, EBX, expected delta, integer-changed flag and EBP. `scripts/analyze_mk2_object_steps.py` groups per object-pointer-axis and measures actual integration-store cadence, checks mod2^32 delta equals EBX. NEXT: update+build branch on Windows, run core=normal, 40000 protected cycles, `DOSBOX_MK2_SIGNAL_WATCH=1` and `DOSBOX_MK2_TRACE=<unique csv>`; analyze/upload `_object_steps.csv` and optionally 0x21374A helper snapshot; direct movie/game state evidence needed before asserting full combat simulation rate. No game code bytes/assets in GitHub, no PIT/VGA/guest modifications.
+> MK2 DOS timing research in GitHub `WildGer/dosbox-staging` branch `mk2-timing-research`; read latest findings **2026-11-10 22:27: actual full-DWORD motion integration cadence confirmed**. Previous 16-bit real-mode IRQ0 09B0:08AF increments a pending DWORD at ~60.05Hz; protected-mode consumer 0180:2054AD clears it; task scheduler at 0180:205531 with main callbacks ~60Hz; VGA ~70.09Hz. User-provided disassembly of real 32-bit x86 code: 0180:002315B1 adds DWORD [EBP+0x10] to DWORD [EBP+0x18]; 0180:002315B7 adds DWORD [EBP+0x14] to DWORD [EBP+0x1C]. Watched object upper words +0x1A/+0x1E are high halves of likely signed 16.16 positions; e.g. increment 196608 = 3.0. Latest **user-supplied console output**, NOT raw CSV, from `mk2_normal_40000_20261110_222749_object_steps.csv`: **20,016 observed ADD stores**, 0 delta/EBX mismatches, 20,016 EBP=object-pointer matches. Exactly 10,008 ADD stores at each writer. For each of four (A/B, +0x18/+0x1C) primary object groups: **4,636 ADDs, median 16.664ms** (~60Hz), including stationary updates. Primary ptrs A=0x2B8104 B=0x2B815C. Four alternate groups A=0x2B88EC B=0x2B8AFC each **368 ADDs**, median 13.806ms for A, 13.998ms for B; all zero increments, phase unknown, cadence near VGA but NOT proven VGA locked. Total 18,544 primary +1,472 alternate ADDs. Of 20,016 stores **3,703 integer-high-WORD changes, 112 fractional-only, 16,201 zero-delta**, explaining old ~21ms conditional position change rate. This directly establishes near-60Hz **movement-integrator instruction execution** for primary objects; NOT proven entire combat simulation tick (input/collision/animation could differ). Spacings vary (primary 6.4-39.7ms). NEXT ask user to upload existing **same-run** raw `*_object_steps.csv`, `*_signal.csv`, `*_dispatch.csv`, `*_frames.csv` (prefix `mk2_normal_40000_20261110_222749`), compare actual timestamps and phases, no re-run. No copyrighted MK2 bytes in GitHub and never change executable/PIT/VGA timing.
 
 **Raw CSVs are not in the repository.** Continue from the user-provided capture files in this conversation if available.
