@@ -1033,6 +1033,104 @@ Windows compilation and runtime validation.
 No timing controls, guest memory, or MK2
 executable are modified.
 
+### 2026-11-10: direct writer attribution for MK2 candidate object fields
+
+A fresh user-provided `analyze_mk2_object_trace.py` output
+from `mk2_normal_40000_20261110_210131_dispatch.csv`
+contains **24,072** dispatches, **1,485** observed
+changes in candidate object A and **503** in object B.
+Both have median change spacing **16.652 ms**.
+`0x2133B5` is the **previous scheduled callback**
+before 1,021 A changes and 348 B changes, but
+this is a temporal correlation, **NOT a proven
+writer**.
+
+The existing `scripts/analyze_mk2_object_trace.py`
+has also been updated: previously it reported
+zero pointer changes despite two observed
+pointer values per object. The reason was
+`previous=None` after invalid samples,
+which masked switches across those gaps.
+It now compares against the last valid pointer
+and reports separately whether a change
+occurred across an invalid-sample gap,
+without inventing the exact transition time.
+You can rerun the same old `_dispatch.csv`
+through this corrected script to see the fix;
+no new game capture is required for that.
+
+**NEW diagnostic** in `src/hardware/mk2_signal_probe.h`
+uses the existing `Mk2SignalBeforeWrite`/
+`Mk2SignalAfterWrite` guest-store hooks to
+monitor only four 16-bit fields:
+
+- candidate object A at `+0x1A` and `+0x1E`
+- candidate object B at `+0x1A` and `+0x1E`
+
+The object pointers are refreshed at every
+confirmed `0180:00205531` dispatch. A store
+overlapping a watched field produces a row
+**only if its WORD value changed** in the
+new `*_object_writes.csv` file:
+
+`emulated_ms`, `object`, `field_offset`,
+`object_pointer`, `object_linear`,
+`field_linear`, `store_linear`,
+`store_size`, `before`, `after`,
+`writer_cs`, `writer_cs_base`,
+`writer_eip`, `writer_ds`,
+`writer_ds_base`, `protected_mode`.
+
+This captures the guest **instruction
+responsible for the observed store**, instead
+of assuming it was the scheduler's preceding
+callback. It does NOT observe uninstrumented
+native/direct-memory writes or all aliases.
+It may miss writes while an object pointer
+is being swapped before the next dispatcher
+refresh. The watch is default-off along with
+the existing signal instrumentation and
+modifies no guest memory or timing values.
+Its performance data are not suitable as
+a benchmark.
+
+After rebuilding the latest branch, run
+the same normal-core MK2 launcher with
+`cpu_cycles_protected=40000`,
+`DOSBOX_MK2_SIGNAL_WATCH=1` and
+`DOSBOX_MK2_TRACE` set to a unique file
+in `Documents/MK2Timing`. The same run
+will generate the new `*_object_writes.csv`
+alongside existing trace outputs.
+
+```powershell
+# Run in the DOSBox Staging repository after MK2 exits.
+$folder = "$env:USERPROFILE\Documents\MK2Timing"
+$latest = Get-ChildItem "$folder" -Filter "*_object_writes.csv" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if ($null -ne $latest) {
+    python scripts/analyze_mk2_object_writes.py "$($latest.FullName)"
+} else {
+    Write-Host "No _object_writes.csv: update/rebuild and rerun the opt-in probe."
+}
+```
+
+Upload the new `*_object_writes.csv` and the
+analyzer output. Compare the dominant writer
+CS:EIP with the privately captured
+`0x21374A` helper code. Only after
+tracing the actual writer chain and
+confirming live game-state transitions
+can we establish a true combat simulation
+step cadence, instead of merely an
+IRQ0-based task scheduler.
+
+**Status:** This additional writer watch has
+been committed, but still requires a
+Windows compile and runtime validation.
+
 ## Source hooks
 
 - `src/hardware/timer.cpp`: PIT0 reprogramming and scheduled PIT0 events.
@@ -1055,6 +1153,7 @@ executable are modified.
 - `scripts/analyze_mk2_dispatch_trace.py`: group callback destinations and task recurrence in emulated time.
 - `src/hardware/mk2_signal_probe.h`: opt-in, one-time 256-byte private callback snapshots at 14 selected dispatched EIPs (`_dispatch_code.csv`).
 - `scripts/analyze_mk2_object_trace.py`: analyze candidate object +0x1A/+0x1E field deltas sampled immediately before each timed-task dispatch.
+- `scripts/analyze_mk2_object_writes.py`: attribute observed candidate object field STORE instructions to guest CS:EIP using new `_object_writes.csv` (not merely temporal correlation).
 - `src/hardware/mk2_signal_probe.h`: add eight helper-candidate private snippets and candidate object fields to the same opt-in diagnostic streams.
 - `src/hardware/video/vga_draw.cpp`: hook before/after VGA line conversion at precise emulated scanline time.
 - `src/gui/render/mk2_frame_probe.h`: exposes existing visible image hash to the boundary sampler without rehashing.
