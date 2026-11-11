@@ -39,6 +39,10 @@ def main() -> None:
     total_dispatches = 0
     valid_counts = Counter()
     swaps = Counter()
+    swaps_across_gaps = Counter()
+    invalid_samples = Counter()
+    last_valid_pointer: dict[str, int | None] = {"a": None, "b": None}
+    had_gap: dict[str, bool] = {"a": False, "b": False}
 
     with args.csv_file.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -59,7 +63,9 @@ def main() -> None:
             now = float(row["emulated_ms"])
             for slot in ("a", "b"):
                 if int(row[f"object_{slot}_valid"]) == 0:
+                    invalid_samples[slot] += 1
                     previous[slot] = None
+                    had_gap[slot] = True
                     continue
                 valid_counts[slot] += 1
                 ptr = int(row[f"object_{slot}_pointer"])
@@ -67,8 +73,17 @@ def main() -> None:
                 f1e = int(row[f"object_{slot}_field_1e"])
                 pointers[slot][ptr] += 1
                 last = previous[slot]
-                if last and ptr != last[0]:
+                # A pointer may switch while the global is NULL or a
+                # sampled object field is unavailable. Compare with the
+                # last valid pointer across these gaps, while clearly
+                # separating switches of unknown timing.
+                last_ptr = last_valid_pointer[slot]
+                if last_ptr is not None and ptr != last_ptr:
                     swaps[slot] += 1
+                    if had_gap[slot]:
+                        swaps_across_gaps[slot] += 1
+                last_valid_pointer[slot] = ptr
+                had_gap[slot] = False
                 if last and ptr == last[0] and (f1a, f1e) != last[1:]:
                     changed[slot].append(now)
                     changes_after[slot][
@@ -84,7 +99,9 @@ def main() -> None:
     for slot in ("a", "b"):
         print(f"\nObject {slot.upper()} candidate:")
         print(f"  Valid samples: {valid_counts[slot]:,}")
-        print(f"  Pointer changes: {swaps[slot]:,}")
+        print(f"  Invalid/gap samples: {invalid_samples[slot]:,}")
+        print(f"  Observed pointer switches: {swaps[slot]:,} "
+              f"(across invalid sample gaps: {swaps_across_gaps[slot]:,})")
         print(f"  Field changes (+0x1A and/or +0x1E): {len(changed[slot]):,}")
         print(f"  Change spacing: {summarize_intervals(changed[slot])}")
         print(f"  Top pointer values: "
@@ -96,6 +113,9 @@ def main() -> None:
     print("- Fields +0x1A/+0x1E were selected because the callback code "
           "uses them as signed 16-bit values; coordinate semantics "
           "and object identity are not yet verified.")
+    print("- Pointer switches across invalid samples are detected "
+          "between the last and next valid snapshots; their exact "
+          "transition time is not established.")
     print("- Samples occur before callback dispatch. The previously "
           "dispatched task is a correlation candidate, NOT a proven "
           "writer. A direct write watchpoint is needed for attribution.")
